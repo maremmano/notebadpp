@@ -1213,7 +1213,7 @@ if (Test-Path $securityLogPath) {
             $suspiciousEntries += $line
         }
         # Check for entries during attack window (if dates are in the log)
-        if ($line -match '202[5]-(0[6-9]|1[0-2])' -or $line -match '2025.*Jun|Jul|Aug|Sep|Oct|Nov|Dec') {
+        if ($line -match '202[5]-(0[6-9]|1[0-2])' -or $line -match '2025.*(Jun|Jul|Aug|Sep|Oct|Nov|Dec)') {
             $suspiciousEntries += $line
         }
     }
