@@ -1,57 +1,62 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Checks for indicators of compromise related to the Notepad++ supply chain attack (June-December 2025)
+    NoteBad++ - IOC Scanner for the Notepad++ supply chain attack (June-December 2025)
 
 .DESCRIPTION
-    This script checks for:
-    - Suspicious directories and files
-    - Known malicious file hashes (SHA1 from Kaspersky, SHA256 from Rapid7)
-    - Registry autorun persistence
-    - Windows services and scheduled tasks persistence
-    - DNS cache entries for malicious domains
-    - Hosts file tampering
-    - Active network connections to malicious IPs
-    - DNS client event logs
-    - Temp.sh related activity
+    This script checks for indicators of compromise (IoCs) associated with the
+    Chrysalis backdoor deployed by Lotus Blossom APT via compromised Notepad++
+    update infrastructure.
+
+    Checks include:
+    - Known malicious file hashes (SHA-1 from Kaspersky, SHA-256 from Rapid7)
+    - Critical file paths (ProShow\load, Adobe\Scripts\alien.ini, Bluetooth\log.dll)
+    - Registry/service/scheduled task persistence
+    - DNS cache and hosts file for C2 domains
+    - Network connections to C2 infrastructure
+    - Event logs within the attack window
 
     This script is READ-ONLY and does NOT modify your system.
 
 .PARAMETER ExportResults
-    Export scan results to a text file.
+    Export scan results to a text file (legacy format).
+
+.PARAMETER ExportJson
+    Export structured evidence as JSON for further analysis.
 
 .PARAMETER OutputPath
     Custom path for the exported results file.
 
 .PARAMETER DeepHashScan
-    Extends SHA-256 hash scanning beyond AppData to also check
-    Downloads, Temp, and ProgramData directories.
+    Extends hash scanning beyond AppData to Downloads, Temp, ProgramData.
 
 .PARAMETER NoColor
-    Disables colored output. Useful for piping to a file or running in
-    environments that do not support ANSI colors.
+    Disables colored output. Useful for piping or logging.
+
+.PARAMETER AttackStart
+    Start of attack window for log filtering. Default: 2025-06-01
+
+.PARAMETER AttackEnd
+    End of attack window for log filtering. Default: 2025-12-02
 
 .EXAMPLE
-    .\nppcheck.ps1
+    .\notebadpp.ps1
     Run a standard scan with colored output.
 
 .EXAMPLE
-    .\nppcheck.ps1 -DeepHashScan
-    Run with extended hash scanning across additional directories.
+    .\notebadpp.ps1 -DeepHashScan -ExportJson
+    Run extended scan and export structured JSON evidence.
 
 .EXAMPLE
-    .\nppcheck.ps1 -NoColor | Out-File scan_results.txt
-    Run with plain text output and save to a log file.
-
-.EXAMPLE
-    .\nppcheck.ps1 -ExportResults -OutputPath "C:\Reports\scan.txt"
-    Run scan and export formatted results to custom path.
+    .\notebadpp.ps1 -AttackStart "2025-09-01" -AttackEnd "2025-11-15"
+    Scan with custom attack window for log filtering.
 
 .NOTES
     IoC Sources:
-    - Kaspersky GReAT analysis published February 3, 2026
-    - Rapid7 Labs "The Chrysalis Backdoor" report February 2026
-    Run as Administrator for full functionality
+    - Kaspersky GReAT analysis (February 3, 2026)
+    - Rapid7 Labs "The Chrysalis Backdoor" report (February 2026)
+
+    Attack window: June 1, 2025 - December 2, 2025 (attacker access cutoff)
 
 .LINK
     https://github.com/maremmano/notebadpp
@@ -60,24 +65,69 @@
 [CmdletBinding()]
 param(
     [switch]$ExportResults,
-    [string]$OutputPath = "$env:USERPROFILE\Desktop\NotepadPP_IOC_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt",
+    [switch]$ExportJson,
+    [string]$OutputPath = "$env:USERPROFILE\Desktop\NoteBadPP_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
     [switch]$DeepHashScan,
-    [switch]$NoColor
+    [switch]$NoColor,
+    [datetime]$AttackStart = '2025-06-01',
+    [datetime]$AttackEnd = '2025-12-02'
 )
 
-# Script state
-$script:FindingsCount = 0
-$script:Results = @()
+# ============================================================================
+# SCRIPT STATE & EVIDENCE COLLECTION
+# ============================================================================
+
+# Separate IOC findings (real compromise indicators) from Risk findings (config issues)
+$script:IOCFindings = @()      # Hash matches, malicious files, C2 connections, etc.
+$script:RiskFindings = @()     # Old version, GUP present, logging disabled, etc.
+$script:Evidence = @()         # Structured evidence objects for JSON export
+$script:Results = @()          # Legacy text output
 $scanStartTime = Get-Date
 
-function Write-Finding {
+function Add-Evidence {
+    param(
+        [string]$Category,
+        [string]$Severity,
+        [string]$Description,
+        [string]$Path = "",
+        [string]$Hash = "",
+        [datetime]$Timestamp = (Get-Date),
+        [hashtable]$Extra = @{}
+    )
+    $evidence = [PSCustomObject]@{
+        Category    = $Category
+        Severity    = $Severity
+        Description = $Description
+        Path        = $Path
+        Hash        = $Hash
+        Timestamp   = $Timestamp
+        ScanTime    = Get-Date
+        Extra       = $Extra
+    }
+    $script:Evidence += $evidence
+    return $evidence
+}
+
+function Write-IOC {
     param([string]$Message, [string]$Severity = "HIGH")
-    $script:FindingsCount++
-    $output = "[!] [$Severity] $Message"
+    $script:IOCFindings += $Message
+    $output = "[IOC] [$Severity] $Message"
     if ($NoColor) {
         Write-Output $output
     } else {
         Write-Host $output -ForegroundColor Red
+    }
+    $script:Results += $output
+}
+
+function Write-Risk {
+    param([string]$Message, [string]$Severity = "MEDIUM")
+    $script:RiskFindings += $Message
+    $output = "[RISK] [$Severity] $Message"
+    if ($NoColor) {
+        Write-Output $output
+    } else {
+        Write-Host $output -ForegroundColor Yellow
     }
     $script:Results += $output
 }
@@ -208,15 +258,40 @@ $Rapid7FileIndicators = @(
 )
 $Rapid7Hashes = $Rapid7FileIndicators | ForEach-Object { $_.Hash.ToLower() }
 
-# Suspicious directories
+# ============================================================================
+# HASHSETS FOR O(1) LOOKUPS
+# ============================================================================
+$SHA1HashSet = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]($MaliciousHashes | ForEach-Object { $_.ToLower() })
+)
+$SHA256HashSet = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]($Rapid7Hashes)
+)
+$MaliciousIPSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$MaliciousIPs)
+
+# ============================================================================
+# CRITICAL IOC PATHS (Kaspersky's strongest indicators)
+# These are HIGH confidence IoCs - if present, likely compromised
+# ============================================================================
+$CriticalIOCPaths = @(
+    "$env:APPDATA\ProShow\load",
+    "$env:APPDATA\Adobe\Scripts\alien.ini",
+    "$env:APPDATA\Adobe\Scripts\alien.dll",
+    "$env:APPDATA\Bluetooth\BluetoothService.exe",
+    "$env:APPDATA\Bluetooth\BluetoothService",
+    "$env:APPDATA\Bluetooth\log.dll"
+)
+
+# Directories that MAY exist legitimately (downgrade to INFO unless files match)
 $SuspiciousDirectories = @(
     "$env:APPDATA\ProShow",
     "$env:APPDATA\Adobe\Scripts",
     "$env:APPDATA\Bluetooth"
 )
 
-# Suspicious file names (Kaspersky + Rapid7)
+# All suspicious file paths (for broader scanning)
 $SuspiciousFiles = @(
+    # ProShow chain
     "$env:APPDATA\ProShow\load",
     "$env:APPDATA\ProShow\ProShow.exe",
     "$env:APPDATA\ProShow\defscr",
@@ -224,20 +299,27 @@ $SuspiciousFiles = @(
     "$env:APPDATA\ProShow\proshow.crs",
     "$env:APPDATA\ProShow\proshow.phd",
     "$env:APPDATA\ProShow\proshow_e.bmp",
+    # Adobe\Scripts chain
     "$env:APPDATA\Adobe\Scripts\alien.dll",
     "$env:APPDATA\Adobe\Scripts\alien.ini",
     "$env:APPDATA\Adobe\Scripts\lua5.1.dll",
     "$env:APPDATA\Adobe\Scripts\script.exe",
     "$env:APPDATA\Adobe\Scripts\a.txt",
+    # Bluetooth chain (Chrysalis)
     "$env:APPDATA\Bluetooth\BluetoothService.exe",
     "$env:APPDATA\Bluetooth\BluetoothService",
     "$env:APPDATA\Bluetooth\log.dll",
-    # Additional files from Rapid7 report
     "$env:APPDATA\Bluetooth\u.bat",
     "$env:APPDATA\Bluetooth\conf.c",
-    "$env:APPDATA\Bluetooth\libtcc.dll",
-    "$env:LOCALAPPDATA\Temp\ns*.tmp",
-    "C:\ProgramData\USOShared\*.exe"
+    "$env:APPDATA\Bluetooth\libtcc.dll"
+)
+
+# Specific IOC filenames to search for (used in targeted hash scanning)
+$IOCFilenames = @(
+    'update.exe', 'AutoUpdater.exe', 'install.exe',
+    'BluetoothService.exe', 'BluetoothService', 'log.dll',
+    'ConsoleApplication2.exe', 's047t5g.exe', 'libtcc.dll',
+    'alien.dll', 'alien.ini', 'load', 'ProShow.exe'
 )
 
 # ============================================================================
@@ -316,12 +398,12 @@ if (-not $nppInstalled) {
     Write-Host ""
     
     if ($gupFound) {
-        Write-Finding "GUP.exe (auto-updater) is present - full scan recommended" "MEDIUM"
+        Write-Risk "GUP.exe (auto-updater) is present - full scan recommended" "LOW"
         Write-Info "  The attack exploited the auto-update mechanism"
     } else {
         Write-Clean "GUP.exe not found - lower risk (manual updates only)"
     }
-    
+
     # Check version for immediate risk assessment
     if ($nppVersion) {
         # Sanitize version string (sometimes contains text like "8.6.2 (64-bit)")
@@ -331,7 +413,7 @@ if (-not $nppInstalled) {
             $vSafe = [version]"8.8.9"
 
             if ($vCurrent -lt $vSafe) {
-                Write-Finding "Version $nppVersion is BELOW 8.8.9 - UPDATE REQUIRED" "HIGH"
+                Write-Risk "Version $nppVersion is BELOW 8.8.9 - UPDATE RECOMMENDED" "MEDIUM"
             } else {
                 Write-Clean "Version $nppVersion is patched (8.8.9+)"
             }
@@ -342,16 +424,62 @@ if (-not $nppInstalled) {
 }
 
 # ============================================================================
-# CHECK 1: Suspicious Directories
+# CHECK 0: CRITICAL IOC PATHS (Highest confidence indicators)
+# ============================================================================
+Write-Section "CHECK 0: Critical IOC Paths (Highest Confidence)"
+
+Write-Info "Checking for Kaspersky's strongest file-based indicators..."
+$criticalFound = $false
+
+foreach ($critPath in $CriticalIOCPaths) {
+    if (Test-Path $critPath) {
+        $fileInfo = Get-Item $critPath -Force
+        Write-IOC "CRITICAL IOC FILE EXISTS: $critPath" "HIGH"
+        Write-Info "  Size: $($fileInfo.Length) bytes"
+        Write-Info "  Created: $($fileInfo.CreationTime)"
+        Write-Info "  Modified: $($fileInfo.LastWriteTime)"
+
+        Add-Evidence -Category "CriticalIOC" -Severity "HIGH" `
+            -Description "Critical IOC file found" -Path $critPath `
+            -Timestamp $fileInfo.LastWriteTime
+
+        # Try to hash it
+        try {
+            $sha256 = (Get-FileHash $critPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+            Write-Info "  SHA256: $sha256"
+            if ($SHA256HashSet.Contains($sha256)) {
+                Write-IOC "SHA256 MATCHES KNOWN MALICIOUS HASH" "HIGH"
+            }
+        } catch {}
+
+        $criticalFound = $true
+    }
+}
+
+if (-not $criticalFound) {
+    Write-Clean "No critical IOC files found (good sign)"
+}
+
+# ============================================================================
+# CHECK 1: Suspicious Directories (INFO only - directories can exist legitimately)
 # ============================================================================
 Write-Section "CHECK 1: Suspicious Directories"
 
+Write-Info "Note: These directories CAN exist legitimately. Only escalate if malicious files found."
+
 foreach ($dir in $SuspiciousDirectories) {
     if (Test-Path $dir) {
-        Write-Finding "Suspicious directory EXISTS: $dir"
-        Write-Info "  Contents:"
-        Get-ChildItem -Path $dir -Force -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Info "    - $($_.Name) ($(if($_.PSIsContainer){'DIR'}else{$_.Length + ' bytes'}))"
+        Write-Info "Directory exists: $dir"
+        $items = Get-ChildItem -Path $dir -Force -ErrorAction SilentlyContinue
+        if ($items) {
+            Write-Info "  Contents ($($items.Count) items):"
+            foreach ($item in $items) {
+                $itemInfo = "    - $($item.Name)"
+                if (-not $item.PSIsContainer) {
+                    $itemInfo += " ($($item.Length) bytes)"
+                }
+                Write-Info $itemInfo
+            }
         }
     } else {
         Write-Clean "Directory not found: $dir"
@@ -359,133 +487,186 @@ foreach ($dir in $SuspiciousDirectories) {
 }
 
 # ============================================================================
-# CHECK 2: Suspicious Files
+# CHECK 2: Suspicious Files (IOCs if specific malicious files found)
 # ============================================================================
 Write-Section "CHECK 2: Suspicious Files"
 
+$suspiciousFileFound = $false
+
 foreach ($file in $SuspiciousFiles) {
-    if ($file -match '\*') {
-        # Handle wildcards
-        # Fix: Renamed variable from $matches to $foundFiles (avoid overwriting reserved automatic variable)
-        $foundFiles = Get-ChildItem -Path $file -Force -ErrorAction SilentlyContinue
-        if ($foundFiles) {
-            foreach ($found in $foundFiles) {
-                Write-Finding "Suspicious file pattern match: $($found.FullName)"
-            }
-        }
-    } else {
-        if (Test-Path $file) {
-            Write-Finding "Suspicious file EXISTS: $file"
-            $fileInfo = Get-Item $file -Force
+    if (Test-Path $file) {
+        $fileInfo = Get-Item $file -Force
+
+        # Check if this is a critical IOC (already reported in CHECK 0)
+        $isCritical = $CriticalIOCPaths -contains $file
+
+        if (-not $isCritical) {
+            Write-IOC "Suspicious file EXISTS: $file" "MEDIUM"
             Write-Info "  Size: $($fileInfo.Length) bytes"
             Write-Info "  Created: $($fileInfo.CreationTime)"
             Write-Info "  Modified: $($fileInfo.LastWriteTime)"
+
+            Add-Evidence -Category "SuspiciousFile" -Severity "MEDIUM" `
+                -Description "Suspicious file found" -Path $file `
+                -Timestamp $fileInfo.LastWriteTime
         }
+        $suspiciousFileFound = $true
     }
 }
 
-# Check for NSIS temp directories (indicator of NSIS installer execution)
+if (-not $suspiciousFileFound) {
+    Write-Clean "No suspicious files found in expected IOC paths"
+}
+
+# Check for NSIS temp directories within attack window
 $nsisTempDirs = Get-ChildItem -Path "$env:LOCALAPPDATA\Temp" -Directory -Filter "ns*.tmp" -ErrorAction SilentlyContinue
 if ($nsisTempDirs) {
-    Write-Finding "NSIS temp directories found (may indicate malicious installer execution):" "MEDIUM"
-    foreach ($nsisDir in $nsisTempDirs) {
-        Write-Info "  - $($nsisDir.FullName) (Created: $($nsisDir.CreationTime))"
+    $attackWindowNsis = $nsisTempDirs | Where-Object {
+        $_.CreationTime -ge $AttackStart -and $_.CreationTime -le $AttackEnd
+    }
+
+    if ($attackWindowNsis) {
+        Write-IOC "NSIS temp directories from ATTACK WINDOW found:" "MEDIUM"
+        foreach ($nsisDir in $attackWindowNsis) {
+            Write-Info "  - $($nsisDir.FullName) (Created: $($nsisDir.CreationTime))"
+        }
+    } else {
+        Write-Info "NSIS temp directories exist but outside attack window (likely benign)"
     }
 } else {
     Write-Clean "No NSIS temp directories found"
 }
 
 # ============================================================================
-# CHECK 3: File Hash Verification
+# CHECK 3: Targeted Hash Verification (SHA-1 + SHA-256)
 # ============================================================================
-Write-Section "CHECK 3: File Hash Verification"
+Write-Section "CHECK 3: Targeted Hash Verification"
+
+Write-Info "Scanning specific IOC locations and filenames only (not entire Temp folder)..."
 
 $filesToHash = @()
+
+# 1. All files in suspicious directories
 foreach ($dir in $SuspiciousDirectories) {
     if (Test-Path $dir) {
         $filesToHash += Get-ChildItem -Path $dir -File -Force -Recurse -ErrorAction SilentlyContinue
     }
 }
 
-# Also check common locations
-$additionalPaths = @(
-    "$env:LOCALAPPDATA\Temp",
-    "C:\ProgramData\USOShared",
+# 2. Specific IOC filenames in key locations
+$searchLocations = @(
+    "$env:APPDATA",
+    "$env:LOCALAPPDATA",
     "$env:APPDATA\Notepad++",
     "$env:PROGRAMFILES\Notepad++",
-    "${env:PROGRAMFILES(x86)}\Notepad++"
+    "${env:PROGRAMFILES(x86)}\Notepad++",
+    "$env:USERPROFILE\Downloads"
 )
 
-foreach ($path in $additionalPaths) {
-    if (Test-Path $path) {
-        $filesToHash += Get-ChildItem -Path $path -File -Force -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Extension -match '\.(exe|dll|ini)$' -or $_.Name -eq 'load' -or $_.Name -eq 'BluetoothService' }
+foreach ($loc in $searchLocations) {
+    if (Test-Path $loc) {
+        foreach ($iocName in $IOCFilenames) {
+            $found = Get-ChildItem -Path $loc -Filter $iocName -File -Force -Recurse -ErrorAction SilentlyContinue
+            if ($found) { $filesToHash += $found }
+        }
     }
 }
 
-$hashMatches = 0
+# 3. USOShared - only check if files exist AND are in attack window AND unsigned
+$usoPath = "C:\ProgramData\USOShared"
+if (Test-Path $usoPath) {
+    $usoExes = Get-ChildItem -Path $usoPath -Filter "*.exe" -File -Force -ErrorAction SilentlyContinue
+    foreach ($exe in $usoExes) {
+        # Only flag if in attack window
+        if ($exe.CreationTime -ge $AttackStart -and $exe.CreationTime -le $AttackEnd) {
+            $sig = Get-AuthenticodeSignature -FilePath $exe.FullName -ErrorAction SilentlyContinue
+            if ($sig.Status -ne 'Valid') {
+                $filesToHash += $exe
+                Write-Info "USOShared exe in attack window (unsigned): $($exe.Name)"
+            }
+        }
+    }
+}
+
+# Deduplicate files
+$filesToHash = $filesToHash | Sort-Object FullName -Unique
+
+$sha1Matches = 0
+$sha256Matches = 0
+
 if ($filesToHash.Count -gt 0) {
-    Write-Info "Checking $($filesToHash.Count) files against known malicious SHA-1 hashes..."
+    Write-Info "Checking $($filesToHash.Count) targeted files against known hashes..."
+
     foreach ($file in $filesToHash) {
         try {
-            $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA1 -ErrorAction SilentlyContinue).Hash
-            if ($hash -and $MaliciousHashes -contains $hash.ToLower()) {
-                Write-Finding "MALICIOUS FILE HASH MATCH: $($file.FullName)"
-                Write-Info "  SHA1: $hash"
-                $hashMatches++
+            # Check SHA-1
+            $sha1 = (Get-FileHash -Path $file.FullName -Algorithm SHA1 -ErrorAction Stop).Hash.ToLower()
+            if ($SHA1HashSet.Contains($sha1)) {
+                Write-IOC "SHA-1 HASH MATCH: $($file.FullName)" "HIGH"
+                Write-Info "  SHA-1: $sha1"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "SHA-1 matches known malicious hash" -Path $file.FullName -Hash $sha1
+                $sha1Matches++
             }
-        } catch {
-            # Skip files we can't hash
-        }
-    }
-    if ($hashMatches -eq 0) {
-        Write-Clean "No known malicious SHA-1 hashes found"
-    }
-} else {
-    Write-Clean "No suspicious files to hash"
-}
 
-# ============================================================================
-# CHECK 3b: SHA-256 Hash Scan (Rapid7 Chrysalis IOCs)
-# ============================================================================
-Write-Section "CHECK 3b: SHA-256 Hash Scan (Rapid7 Chrysalis IOCs)"
-
-if ($DeepHashScan) {
-    Write-Info "Deep scan enabled: scanning AppData, LocalAppData, Downloads, Temp, ProgramData..."
-    $sha256SearchPaths = @($env:APPDATA, $env:LOCALAPPDATA, $env:TEMP, "$env:USERPROFILE\Downloads", "$env:ProgramData")
-} else {
-    Write-Info "Standard scan: scanning AppData and LocalAppData (use -DeepHashScan for more)"
-    $sha256SearchPaths = @($env:APPDATA, $env:LOCALAPPDATA)
-}
-
-$sha256Hits = 0
-$filesScanned = 0
-
-foreach ($searchPath in $sha256SearchPaths) {
-    if (-not (Test-Path $searchPath)) { continue }
-    $candidates = Get-ChildItem -Path $searchPath -Include *.exe, *.dll, *.bat, *.cmd -Recurse -Force -ErrorAction SilentlyContinue
-    foreach ($file in $candidates) {
-        $filesScanned++
-        try {
-            $sha256 = (Get-FileHash $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
-            if ($Rapid7Hashes -contains $sha256) {
+            # Check SHA-256
+            $sha256 = (Get-FileHash -Path $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+            if ($SHA256HashSet.Contains($sha256)) {
                 $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
-                Write-Finding "RAPID7 SHA-256 HASH MATCH: $($file.FullName)"
+                Write-IOC "SHA-256 HASH MATCH: $($file.FullName)" "HIGH"
                 Write-Info "  SHA-256: $sha256"
-                Write-Info "  Known As: $($matchInfo.Name)"
-                Write-Info "  Description: $($matchInfo.Desc)"
-                $sha256Hits++
+                Write-Info "  Known As: $($matchInfo.Name) - $($matchInfo.Desc)"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "SHA-256 matches Rapid7 Chrysalis IOC: $($matchInfo.Name)" `
+                    -Path $file.FullName -Hash $sha256
+                $sha256Matches++
             }
         } catch {
             # Skip files we can't hash
         }
     }
+
+    if ($sha1Matches -eq 0 -and $sha256Matches -eq 0) {
+        Write-Clean "No known malicious hashes found ($($filesToHash.Count) files checked)"
+    } else {
+        Write-Info "Hash matches: $sha1Matches SHA-1, $sha256Matches SHA-256"
+    }
+} else {
+    Write-Clean "No targeted files to hash (suspicious directories don't exist)"
 }
 
-if ($sha256Hits -eq 0) {
-    Write-Clean "No Rapid7 Chrysalis SHA-256 matches ($filesScanned files scanned)"
-} else {
-    Write-Info "Total SHA-256 matches: $sha256Hits"
+# Deep scan option for broader coverage
+if ($DeepHashScan) {
+    Write-Section "CHECK 3b: Extended Hash Scan (Deep Mode)"
+    Write-Info "Deep scan: checking additional locations..."
+
+    $deepPaths = @($env:TEMP, "$env:USERPROFILE\Downloads", "$env:ProgramData")
+    $deepFilesScanned = 0
+    $deepMatches = 0
+
+    foreach ($deepPath in $deepPaths) {
+        if (-not (Test-Path $deepPath)) { continue }
+        # Only scan IOC filenames, not all exes
+        foreach ($iocName in $IOCFilenames) {
+            $found = Get-ChildItem -Path $deepPath -Filter $iocName -File -Force -Recurse -ErrorAction SilentlyContinue
+            foreach ($file in $found) {
+                $deepFilesScanned++
+                try {
+                    $sha256 = (Get-FileHash $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+                    if ($SHA256HashSet.Contains($sha256)) {
+                        $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
+                        Write-IOC "DEEP SCAN SHA-256 MATCH: $($file.FullName)" "HIGH"
+                        Write-Info "  Known As: $($matchInfo.Name)"
+                        $deepMatches++
+                    }
+                } catch {}
+            }
+        }
+    }
+
+    if ($deepMatches -eq 0) {
+        Write-Clean "Deep scan: no additional matches ($deepFilesScanned files checked)"
+    }
 }
 
 # ============================================================================
@@ -500,38 +681,41 @@ $autorunPaths = @(
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 )
 
-$suspiciousAutorunPatterns = @(
-    "ProShow",
-    "Adobe\\Scripts",
-    "Bluetooth\\BluetoothService",
-    "alien",
-    "script.exe",
-    "ns*.tmp"
-)
+$autorunFound = $false
 
 foreach ($regPath in $autorunPaths) {
     if (Test-Path $regPath) {
         $entries = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
         $entries.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | ForEach-Object {
-            $value = $_.Value
-            foreach ($pattern in $suspiciousAutorunPatterns) {
-                if ($value -like "*$pattern*") {
-                    Write-Finding "Suspicious autorun entry in $regPath"
-                    Write-Info "  Name: $($_.Name)"
-                    Write-Info "  Value: $value"
-                }
+            # Cast to string to handle non-string registry values
+            $value = [string]$_.Value
+            if ([string]::IsNullOrEmpty($value)) { return }
+
+            # Check for specific IOC patterns using -match (regex)
+            if ($value -match '(?i)\\appdata\\roaming\\(ProShow|Adobe\\Scripts|Bluetooth)\\') {
+                Write-IOC "Autorun points to IOC directory: $($_.Name)" "HIGH"
+                Write-Info "  Path: $regPath"
+                Write-Info "  Value: $value"
+                Add-Evidence -Category "Persistence" -Severity "HIGH" `
+                    -Description "Registry autorun points to IOC directory" -Path $regPath `
+                    -Extra @{ Name = $_.Name; Value = $value }
+                $autorunFound = $true
             }
-            # Also check for temp folder paths in autorun (IOC mentioned in article)
-            if ($value -like "*\Temp\*" -or $value -like "*%TEMP%*") {
-                Write-Finding "Autorun entry pointing to temp folder (suspicious):" "MEDIUM"
+            # Check for temp folder executables (suspicious pattern)
+            elseif ($value -match '(?i)\\temp\\.*(update|autoupdater|install)\.exe') {
+                Write-IOC "Autorun points to suspicious temp executable" "MEDIUM"
                 Write-Info "  Path: $regPath"
                 Write-Info "  Name: $($_.Name)"
                 Write-Info "  Value: $value"
+                $autorunFound = $true
             }
         }
     }
 }
-Write-Clean "Registry autorun check completed"
+
+if (-not $autorunFound) {
+    Write-Clean "No suspicious autorun entries found"
+}
 
 # ============================================================================
 # CHECK 4b: Malicious Services
@@ -544,24 +728,33 @@ $suspiciousServiceFound = $false
 try {
     $services = Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue
     foreach ($svc in $services) {
-        $pathName = $svc.PathName
+        $pathName = [string]$svc.PathName
         $svcName = $svc.Name
 
-        # Check for suspicious service names or paths pointing to AppData/Temp
-        if ($svcName -match "BluetoothService|ProShow" -or $pathName -match "AppData|\\Temp\\") {
-            # Filter out legitimate system paths
-            if ($pathName -notmatch "Windows\\System32|Windows\\SysWOW64|Program Files") {
-                Write-Finding "Suspicious Service Found: $svcName"
-                Write-Info "  Path: $pathName"
-                Write-Info "  State: $($svc.State)"
-                Write-Info "  Start Mode: $($svc.StartMode)"
-                $suspiciousServiceFound = $true
-            }
-        }
+        if ([string]::IsNullOrEmpty($pathName)) { continue }
 
-        # Flag fake BluetoothService (legitimate Bluetooth runs as svchost, not standalone exe)
-        if ($svcName -eq "BluetoothService" -and $pathName -notmatch "svchost") {
-            Write-Finding "Suspicious BluetoothService detected (legitimate Bluetooth runs as svchost)"
+        # BluetoothService running from AppData is a strong IOC
+        # (Legitimate Windows Bluetooth services run as svchost, not standalone exe)
+        if ($pathName -match '(?i)\\appdata\\.*bluetooth') {
+            Write-IOC "BluetoothService running from AppData (Chrysalis IOC)" "HIGH"
+            Write-Info "  Service: $svcName"
+            Write-Info "  Path: $pathName"
+            Write-Info "  State: $($svc.State)"
+            Add-Evidence -Category "Persistence" -Severity "HIGH" `
+                -Description "Malicious BluetoothService" -Path $pathName
+            $suspiciousServiceFound = $true
+        }
+        # Check for other suspicious paths
+        elseif ($pathName -match '(?i)\\appdata\\roaming\\(ProShow|Adobe\\Scripts)\\') {
+            Write-IOC "Service running from IOC directory" "HIGH"
+            Write-Info "  Service: $svcName"
+            Write-Info "  Path: $pathName"
+            $suspiciousServiceFound = $true
+        }
+        # Any service in Temp folder is suspicious
+        elseif ($pathName -match '(?i)\\temp\\' -and $pathName -notmatch 'Windows\\Temp') {
+            Write-IOC "Service running from user Temp folder" "MEDIUM"
+            Write-Info "  Service: $svcName"
             Write-Info "  Path: $pathName"
             $suspiciousServiceFound = $true
         }
@@ -586,12 +779,22 @@ try {
     $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' }
     foreach ($task in $tasks) {
         foreach ($action in $task.Actions) {
-            if ($action.Execute -match "AppData|\\Temp\\|ProShow|Bluetooth\\BluetoothService|Adobe\\Scripts") {
-                Write-Finding "Suspicious Scheduled Task: $($task.TaskName)"
+            $execPath = [string]$action.Execute
+            if ([string]::IsNullOrEmpty($execPath)) { continue }
+
+            if ($execPath -match '(?i)\\appdata\\roaming\\(ProShow|Adobe\\Scripts|Bluetooth)\\') {
+                Write-IOC "Scheduled task runs from IOC directory: $($task.TaskName)" "HIGH"
                 Write-Info "  Path: $($task.TaskPath)"
-                Write-Info "  Action: $($action.Execute)"
+                Write-Info "  Action: $execPath"
                 Write-Info "  Arguments: $($action.Arguments)"
-                Write-Info "  State: $($task.State)"
+                Add-Evidence -Category "Persistence" -Severity "HIGH" `
+                    -Description "Scheduled task persistence" -Path $execPath
+                $suspiciousTaskFound = $true
+            }
+            elseif ($execPath -match '(?i)\\temp\\' -and $execPath -notmatch 'Windows\\Temp') {
+                Write-IOC "Scheduled task runs from user Temp" "MEDIUM"
+                Write-Info "  Task: $($task.TaskName)"
+                Write-Info "  Action: $execPath"
                 $suspiciousTaskFound = $true
             }
         }
@@ -616,7 +819,7 @@ try {
     foreach ($entry in $dnsCache) {
         foreach ($domain in $MaliciousDomains) {
             if ($entry.Entry -like "*$domain*") {
-                Write-Finding "MALICIOUS DOMAIN IN DNS CACHE: $($entry.Entry)"
+                Write-IOC "MALICIOUS DOMAIN IN DNS CACHE: $($entry.Entry)"
                 Write-Info "  Data: $($entry.Data)"
                 Write-Info "  TTL: $($entry.TimeToLive)"
                 $maliciousDnsFound = $true
@@ -643,7 +846,7 @@ if (Test-Path $hostsPath) {
     $hostsHit = Select-String -Path $hostsPath -Pattern $C2Regex -ErrorAction SilentlyContinue
     if ($hostsHit) {
         foreach ($hit in $hostsHit) {
-            Write-Finding "MALICIOUS DOMAIN IN HOSTS FILE: $($hit.Line)"
+            Write-IOC "MALICIOUS DOMAIN IN HOSTS FILE: $($hit.Line)"
             Write-Info "  Line number: $($hit.LineNumber)"
         }
     } else {
@@ -666,7 +869,7 @@ try {
     foreach ($conn in $connections) {
         $remoteIP = $conn.RemoteAddress
         if ($MaliciousIPs -contains $remoteIP) {
-            Write-Finding "ACTIVE CONNECTION TO MALICIOUS IP: $remoteIP"
+            Write-IOC "ACTIVE CONNECTION TO MALICIOUS IP: $remoteIP"
             Write-Info "  Local Port: $($conn.LocalPort)"
             Write-Info "  Remote Port: $($conn.RemotePort)"
             Write-Info "  State: $($conn.State)"
@@ -695,7 +898,7 @@ try {
     $netstatOutput = netstat -an 2>$null | Select-String $ipPattern
     if ($netstatOutput) {
         foreach ($line in $netstatOutput) {
-            Write-Finding "MALICIOUS IP IN NETSTAT: $line"
+            Write-IOC "MALICIOUS IP IN NETSTAT: $line"
         }
     } else {
         Write-Clean "No connections to C2 IPs found in netstat"
@@ -719,7 +922,7 @@ try {
             $message = $event.Message
             foreach ($domain in $MaliciousDomains) {
                 if ($message -like "*$domain*") {
-                    Write-Finding "MALICIOUS DOMAIN IN DNS LOGS: $domain"
+                    Write-IOC "MALICIOUS DOMAIN IN DNS LOGS: $domain"
                     Write-Info "  Time: $($event.TimeCreated)"
                     Write-Info "  Event ID: $($event.Id)"
                     $maliciousDnsLogs = $true
@@ -754,7 +957,7 @@ if (Test-Path $firewallLogPath) {
         foreach ($line in $logContent) {
             foreach ($ip in $MaliciousIPs) {
                 if ($line -match $ip) {
-                    Write-Finding "MALICIOUS IP IN FIREWALL LOG: $ip"
+                    Write-IOC "MALICIOUS IP IN FIREWALL LOG: $ip"
                     Write-Info "  Log entry: $line"
                     $maliciousFirewallHits = $true
                 }
@@ -788,7 +991,7 @@ try {
             
             foreach ($domain in $MaliciousDomains) {
                 if ($queryName -like "*$domain*") {
-                    Write-Finding "MALICIOUS DNS QUERY IN SYSMON: $queryName"
+                    Write-IOC "MALICIOUS DNS QUERY IN SYSMON: $queryName"
                     Write-Info "  Time: $($event.TimeCreated)"
                     $processId = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ProcessId' }).'#text'
                     $image = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'Image' }).'#text'
@@ -809,92 +1012,80 @@ try {
 }
 
 # ============================================================================
-# CHECK 10: Running Process Analysis (with File Location Verification)
+# CHECK 10: Running Process Analysis
 # ============================================================================
 Write-Section "CHECK 10: Running Process Analysis"
 
-$suspiciousProcessNames = @(
-    "ProShow",
-    "script",
-    "BluetoothService",
-    "alien",
-    "AutoUpdater"
-)
+# Specific IOC process names (path-based verification required)
+$iocProcessNames = @("BluetoothService", "ProShow", "ConsoleApplication2", "s047t5g")
 
-$suspiciousProcessPaths = @(
+# IOC directories - any process running from these is suspicious
+$iocDirectories = @(
     "$env:APPDATA\ProShow",
     "$env:APPDATA\Adobe\Scripts",
-    "$env:APPDATA\Bluetooth",
-    "$env:LOCALAPPDATA\Temp"
+    "$env:APPDATA\Bluetooth"
 )
-
-# Legitimate paths for processes that might have suspicious names
-$legitimatePaths = @{
-    "BluetoothService" = @("$env:SystemRoot\System32", "$env:SystemRoot\SysWOW64")
-}
 
 $processes = Get-Process -ErrorAction SilentlyContinue
 $suspiciousProcessFound = $false
 
 foreach ($proc in $processes) {
-    # Check process names
-    foreach ($name in $suspiciousProcessNames) {
-        if ($proc.Name -like "*$name*") {
-            try {
-                $path = $proc.MainModule.FileName
-                
-                # Special handling for BluetoothService - check if it's in legitimate location
-                if ($proc.Name -eq "BluetoothService") {
-                    $isLegit = $false
-                    foreach ($legitPath in $legitimatePaths["BluetoothService"]) {
-                        if ($path -like "$legitPath*") {
-                            $isLegit = $true
-                            break
-                        }
-                    }
-                    if ($isLegit) {
-                        Write-Info "BluetoothService running from legitimate location: $path"
-                        continue
-                    } else {
-                        Write-Finding "BluetoothService running from SUSPICIOUS location!"
-                        Write-Info "  Expected: System32 or SysWOW64"
-                        Write-Info "  Actual: $path"
-                        Write-Info "  PID: $($proc.Id)"
-                        $suspiciousProcessFound = $true
-                    }
-                } else {
-                    Write-Finding "Suspicious process running: $($proc.Name)"
-                    Write-Info "  PID: $($proc.Id)"
-                    Write-Info "  Path: $path"
-                    Write-Info "  Start Time: $($proc.StartTime)"
-                    $suspiciousProcessFound = $true
-                }
-            } catch {
-                Write-Finding "Suspicious process (couldn't get path): $($proc.Name)"
+    try {
+        $procPath = $proc.MainModule.FileName
+        if ([string]::IsNullOrEmpty($procPath)) { continue }
+
+        # Check if process runs from IOC directories
+        foreach ($iocDir in $iocDirectories) {
+            if ($procPath -like "$iocDir*") {
+                Write-IOC "Process running from IOC directory: $($proc.Name)" "HIGH"
                 Write-Info "  PID: $($proc.Id)"
+                Write-Info "  Path: $procPath"
+                Write-Info "  Start Time: $($proc.StartTime)"
+
+                # Check signature
+                $sig = Get-AuthenticodeSignature -FilePath $procPath -ErrorAction SilentlyContinue
+                if ($sig.Status -ne 'Valid') {
+                    Write-Info "  Signature: INVALID or UNSIGNED"
+                } else {
+                    Write-Info "  Signature: $($sig.SignerCertificate.Subject)"
+                }
+
+                Add-Evidence -Category "RunningProcess" -Severity "HIGH" `
+                    -Description "Process running from IOC directory" -Path $procPath `
+                    -Extra @{ PID = $proc.Id; StartTime = $proc.StartTime }
                 $suspiciousProcessFound = $true
             }
         }
-    }
-    
-    # Check process paths
-    try {
-        $procPath = $proc.MainModule.FileName
-        foreach ($suspPath in $suspiciousProcessPaths) {
-            if ($procPath -like "$suspPath*") {
-                # Exclude common legitimate temp executables
-                if ($procPath -notmatch "\\(msi|setup|install).*\.exe$") {
-                    Write-Finding "Process running from suspicious path: $procPath"
-                    Write-Info "  Process: $($proc.Name) (PID: $($proc.Id))"
-                    Write-Info "  Start Time: $($proc.StartTime)"
-                    $suspiciousProcessFound = $true
-                }
+
+        # BluetoothService.exe - ANY instance outside of svchost is suspicious
+        # (Windows Bluetooth runs via svchost, not standalone exe)
+        if ($proc.Name -eq "BluetoothService") {
+            Write-IOC "BluetoothService.exe running (Chrysalis IOC)" "HIGH"
+            Write-Info "  PID: $($proc.Id)"
+            Write-Info "  Path: $procPath"
+            Write-Info "  Note: Legitimate Windows Bluetooth runs as svchost, not standalone exe"
+
+            Add-Evidence -Category "RunningProcess" -Severity "HIGH" `
+                -Description "BluetoothService.exe running - Chrysalis indicator" -Path $procPath
+            $suspiciousProcessFound = $true
+        }
+
+        # Other specific IOC process names
+        foreach ($iocName in $iocProcessNames) {
+            if ($proc.Name -eq $iocName -and $iocName -ne "BluetoothService") {
+                Write-IOC "IOC process name detected: $($proc.Name)" "MEDIUM"
+                Write-Info "  PID: $($proc.Id)"
+                Write-Info "  Path: $procPath"
+                $suspiciousProcessFound = $true
             }
         }
-    } catch {}
+
+    } catch {
+        # Can't access process info (likely system process)
+    }
 }
 
-# Specific check: Is GUP.exe currently running and what did it spawn?
+# Check for GUP.exe (informational only, not an IOC)
 $gupProcesses = Get-Process -Name "GUP" -ErrorAction SilentlyContinue
 if ($gupProcesses) {
     Write-Info "GUP.exe (Notepad++ updater) is currently running"
@@ -904,7 +1095,6 @@ if ($gupProcesses) {
             Write-Info "  Path: $($gup.MainModule.FileName)"
         } catch {}
     }
-    Write-Info "  Note: Check if any suspicious child processes were spawned"
 }
 
 if (-not $suspiciousProcessFound) {
@@ -942,7 +1132,7 @@ if (Test-Path $psHistoryPath) {
         $lineNum++
         foreach ($pattern in $maliciousCommandPatterns) {
             if ($line -match $pattern) {
-                Write-Finding "MALICIOUS COMMAND PATTERN IN POWERSHELL HISTORY"
+                Write-IOC "MALICIOUS COMMAND PATTERN IN POWERSHELL HISTORY"
                 Write-Info "  Line $lineNum`: $line"
                 Write-Info "  Pattern: $pattern"
                 $maliciousHistoryFound = $true
@@ -950,7 +1140,7 @@ if (Test-Path $psHistoryPath) {
         }
         # Also check for temp.sh references
         if ($line -match "temp\.sh") {
-            Write-Finding "Reference to temp.sh found in PowerShell history"
+            Write-IOC "Reference to temp.sh found in PowerShell history"
             Write-Info "  Line $lineNum`: $line"
             $maliciousHistoryFound = $true
         }
@@ -972,7 +1162,7 @@ try {
             $cmd = $_.Value
             foreach ($pattern in $maliciousCommandPatterns) {
                 if ($cmd -match $pattern) {
-                    Write-Finding "Malicious command in Run history: $cmd"
+                    Write-IOC "Malicious command in Run history: $cmd"
                 }
             }
         }
@@ -993,7 +1183,7 @@ foreach ($searchPath in $searchPaths) {
     if (Test-Path $searchPath) {
         $content = Get-Content $searchPath -Raw -ErrorAction SilentlyContinue
         if ($content -match "whoami|AUTHORITY\\") {
-            Write-Finding "Reconnaissance output file found: $searchPath"
+            Write-IOC "Reconnaissance output file found: $searchPath"
             Write-Info "  This file may contain exfiltrated system info"
         }
     }
@@ -1007,14 +1197,37 @@ Write-Section "CHECK 12: Notepad++ Security Error Log"
 $securityLogPath = "$env:LOCALAPPDATA\Notepad++\log\securityError.log"
 
 if (Test-Path $securityLogPath) {
-    Write-Finding "securityError.log EXISTS - update verification failures detected" "MEDIUM"
-    Write-Info "Log location: $securityLogPath"
-    Write-Info "Last 20 lines of security log:"
-    Get-Content $securityLogPath -Tail 20 | ForEach-Object {
-        Write-Info "  $_"
+    # securityError.log existence alone is NOT an IOC - it just means signature checks failed
+    # Only escalate if it contains entries from the attack window or mentions suspicious domains
+    Write-Info "securityError.log exists (Notepad++ logged update verification failures)"
+    Write-Info "  Path: $securityLogPath"
+
+    $logContent = Get-Content $securityLogPath -ErrorAction SilentlyContinue
+    $suspiciousEntries = @()
+
+    foreach ($line in $logContent) {
+        # Check for C2 domains or suspicious URLs in log
+        if ($line -match 'cdncheck|self-dns|safe-dns|wiresguard|skycloudcenter|temp\.sh') {
+            $suspiciousEntries += $line
+        }
+        # Check for entries during attack window (if dates are in the log)
+        if ($line -match '202[5]-(0[6-9]|1[0-2])' -or $line -match '2025.*Jun|Jul|Aug|Sep|Oct|Nov|Dec') {
+            $suspiciousEntries += $line
+        }
+    }
+
+    if ($suspiciousEntries.Count -gt 0) {
+        Write-IOC "Security log contains suspicious entries from attack window" "MEDIUM"
+        foreach ($entry in ($suspiciousEntries | Select-Object -First 10)) {
+            Write-Info "  $entry"
+        }
+    } else {
+        Write-Info "  Log exists but no suspicious entries found (likely benign verification failures)"
+        Write-Info "  Last 5 lines:"
+        $logContent | Select-Object -Last 5 | ForEach-Object { Write-Info "    $_" }
     }
 } else {
-    Write-Clean "No securityError.log found (good - no update verification failures, or older Notepad++ version)"
+    Write-Clean "No securityError.log found (normal for older N++ versions or no update failures)"
 }
 
 # ============================================================================
@@ -1039,7 +1252,7 @@ foreach ($dlPath in $downloadsPaths) {
         foreach ($fileName in $suspiciousDownloadNames) {
             $files = Get-ChildItem -Path $dlPath -Filter $fileName -File -ErrorAction SilentlyContinue
             foreach ($file in $files) {
-                Write-Finding "Suspicious file in $dlPath`: $($file.Name)" "MEDIUM"
+                Write-Risk "Suspicious file in $dlPath`: $($file.Name)" "MEDIUM"
                 Write-Info "  Full path: $($file.FullName)"
                 Write-Info "  Created: $($file.CreationTime)"
                 Write-Info "  Size: $($file.Length) bytes"
@@ -1047,7 +1260,7 @@ foreach ($dlPath in $downloadsPaths) {
                     $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA1).Hash
                     Write-Info "  SHA1: $hash"
                     if ($MaliciousHashes -contains $hash.ToLower()) {
-                        Write-Finding "MALICIOUS HASH MATCH: $($file.FullName)"
+                        Write-IOC "MALICIOUS HASH MATCH: $($file.FullName)"
                     }
                 } catch {}
             }
@@ -1068,7 +1281,7 @@ $tempSuspiciousFiles = @("update.exe", "install.exe", "AutoUpdater.exe")
 foreach ($fileName in $tempSuspiciousFiles) {
     $tempFile = Join-Path $tempPath $fileName
     if (Test-Path $tempFile) {
-        Write-Finding "SUSPICIOUS FILE IN TEMP: $tempFile"
+        Write-Risk "SUSPICIOUS FILE IN TEMP: $tempFile"
         $fileInfo = Get-Item $tempFile
         Write-Info "  Created: $($fileInfo.CreationTime)"
         Write-Info "  Modified: $($fileInfo.LastWriteTime)"
@@ -1077,7 +1290,7 @@ foreach ($fileName in $tempSuspiciousFiles) {
             $hash = (Get-FileHash -Path $tempFile -Algorithm SHA1).Hash
             Write-Info "  SHA1: $hash"
             if ($MaliciousHashes -contains $hash.ToLower()) {
-                Write-Finding "CONFIRMED MALICIOUS: Hash matches known IOC"
+                Write-IOC "CONFIRMED MALICIOUS: Hash matches known IOC"
             }
         } catch {}
     }
@@ -1097,7 +1310,7 @@ if ($nsisDirs) {
         $attackStart = [DateTime]"2025-06-01"
         $attackEnd = [DateTime]"2025-12-31"
         if ($nsisDir.CreationTime -ge $attackStart -and $nsisDir.CreationTime -le $attackEnd) {
-            Write-Finding "NSIS directory created during attack window (June-Dec 2025)" "MEDIUM"
+            Write-Risk "NSIS directory created during attack window (June-Dec 2025)" "MEDIUM"
         }
     }
 } else {
@@ -1130,7 +1343,7 @@ try {
             $message = $event.Message
             foreach ($pattern in $suspiciousProcessPatterns) {
                 if ($message -match $pattern) {
-                    Write-Finding "Suspicious process creation detected"
+                    Write-Risk "Suspicious process creation detected"
                     Write-Info "  Time: $($event.TimeCreated)"
                     Write-Info "  Pattern matched: $pattern"
                     $suspiciousEventFound = $true
@@ -1157,7 +1370,7 @@ try {
             $message = $event.Message
             if ($message -match "temp\.sh|whoami.*tasklist|curl.*upload" -or
                 $message -match "ProShow|alien\.ini|BluetoothService") {
-                Write-Finding "Suspicious PowerShell activity detected"
+                Write-Risk "Suspicious PowerShell activity detected"
                 Write-Info "  Time: $($event.TimeCreated)"
                 Write-Info "  Event ID: $($event.Id)"
                 $suspiciousPsFound = $true
@@ -1202,11 +1415,11 @@ foreach ($nppPath in $nppPaths) {
                 $vSecure = [version]"8.9.0"
 
                 if ($vCurrent -lt $vSafe) {
-                    Write-Finding "Notepad++ version is below 8.8.9 - CRITICAL: UPDATE IMMEDIATELY" "HIGH"
+                    Write-Risk "Notepad++ version is below 8.8.9 - CRITICAL: UPDATE IMMEDIATELY" "HIGH"
                     Write-Info "  Version 8.8.9+ includes critical security fixes for this attack"
                     Write-Info "  Download from: https://notepad-plus-plus.org/downloads/"
                 } elseif ($vCurrent -lt $vSecure) {
-                    Write-Finding "Notepad++ version is below 8.9 - RECOMMEND UPDATE" "MEDIUM"
+                    Write-Risk "Notepad++ version is below 8.9 - RECOMMEND UPDATE" "MEDIUM"
                     Write-Info "  Version 8.9+ includes enhanced signature verification"
                 } else {
                     Write-Clean "Notepad++ version $cleanVer is current (8.9+)"
@@ -1237,7 +1450,7 @@ foreach ($nppPath in $nppPaths) {
             $hash = (Get-FileHash -Path $updateFile.FullName -Algorithm SHA1).Hash
             Write-Info "    SHA1: $hash"
             if ($MaliciousHashes -contains $hash.ToLower()) {
-                Write-Finding "MALICIOUS UPDATE FILE DETECTED: $($updateFile.FullName)"
+                Write-IOC "MALICIOUS UPDATE FILE DETECTED: $($updateFile.FullName)"
             }
         }
         
@@ -1299,13 +1512,21 @@ foreach ($nppPath in $nppPaths) {
 # ============================================================================
 Write-Section "SCAN SUMMARY"
 
+$iocCount = $script:IOCFindings.Count
+$riskCount = $script:RiskFindings.Count
+$evidenceCount = $script:Evidence.Count
+
 $summary = @"
 Scan completed at: $(Get-Date)
 Computer: $env:COMPUTERNAME
 User: $env:USERNAME
 Scan Duration: $([math]::Round(((Get-Date) - $scanStartTime).TotalSeconds, 2)) seconds
+Attack Window: $($AttackStart.ToString('yyyy-MM-dd')) to $($AttackEnd.ToString('yyyy-MM-dd'))
 
-Total findings: $($script:FindingsCount)
+Results:
+  IOC Findings (compromise indicators): $iocCount
+  Risk Findings (config/hygiene issues): $riskCount
+  Evidence items collected: $evidenceCount
 "@
 
 if ($NoColor) {
@@ -1315,28 +1536,34 @@ if ($NoColor) {
 }
 $script:Results += $summary
 
-if ($script:FindingsCount -gt 0) {
+# Only show COMPROMISE banner if actual IOCs were found (not just risks)
+if ($iocCount -gt 0) {
     if ($NoColor) {
         Write-Output "`n$("=" * 70)"
-        Write-Output "[!!!] POTENTIAL COMPROMISE INDICATORS FOUND!"
+        Write-Output "[!!!] INDICATORS OF COMPROMISE DETECTED!"
         Write-Output "=" * 70
+        Write-Output "`nIOC FINDINGS ($iocCount):"
+        foreach ($ioc in $script:IOCFindings) { Write-Output "  - $ioc" }
         Write-Output "`nIMMEDIATE ACTIONS:"
         Write-Output "  1. DISCONNECT from network NOW (Wi-Fi off / unplug Ethernet)"
         Write-Output "  2. DO NOT delete files yet - preserve evidence"
         Write-Output "  3. Take screenshots of findings"
         Write-Output "`nNEXT STEPS:"
         Write-Output "  4. Run full AV scan (Windows Defender / Kaspersky / Malwarebytes)"
-        Write-Output "  5. Use Microsoft Defender Offline Scan for deeper analysis"
-        Write-Output "  6. If this is a work machine: Contact IT Security immediately"
-        Write-Output "  7. Assume credentials exposed - prepare to change passwords"
-        Write-Output "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis backdoor):"
+        Write-Output "  5. If this is a work machine: Contact IT Security immediately"
+        Write-Output "  6. Assume credentials exposed - change all passwords"
+        Write-Output "`nFOR CONFIRMED COMPROMISE:"
         Write-Output "  - REIMAGE the machine (cleaning is not reliable for this threat)"
-        Write-Output "  - After rebuild: Reinstall Notepad++ v8.8.9+ from official site"
         Write-Output "  - Report to: https://www.cisa.gov/report"
     } else {
         Write-Host "`n" + "=" * 70 -ForegroundColor Red
-        Write-Host "[!!!] POTENTIAL COMPROMISE INDICATORS FOUND!" -ForegroundColor Red
+        Write-Host "[!!!] INDICATORS OF COMPROMISE DETECTED!" -ForegroundColor Red
         Write-Host "=" * 70 -ForegroundColor Red
+
+        Write-Host "`nIOC FINDINGS ($iocCount):" -ForegroundColor Red
+        foreach ($ioc in $script:IOCFindings) {
+            Write-Host "  - $ioc" -ForegroundColor Red
+        }
 
         Write-Host "`nIMMEDIATE ACTIONS:" -ForegroundColor Yellow
         Write-Host "  1. DISCONNECT from network NOW (Wi-Fi off / unplug Ethernet)" -ForegroundColor Yellow
@@ -1345,20 +1572,44 @@ if ($script:FindingsCount -gt 0) {
 
         Write-Host "`nNEXT STEPS:" -ForegroundColor Yellow
         Write-Host "  4. Run full AV scan (Windows Defender / Kaspersky / Malwarebytes)" -ForegroundColor Yellow
-        Write-Host "  5. Use Microsoft Defender Offline Scan for deeper analysis" -ForegroundColor Yellow
-        Write-Host "  6. If this is a work machine: Contact IT Security immediately" -ForegroundColor Yellow
-        Write-Host "  7. Assume credentials exposed - prepare to change passwords:" -ForegroundColor Yellow
-        Write-Host "     - Email, Password Manager, GitHub, VPN, Cloud services" -ForegroundColor Yellow
+        Write-Host "  5. If this is a work machine: Contact IT Security immediately" -ForegroundColor Yellow
+        Write-Host "  6. Assume credentials exposed - change all passwords" -ForegroundColor Yellow
 
-        Write-Host "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis backdoor):" -ForegroundColor Red
+        Write-Host "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis):" -ForegroundColor Red
         Write-Host "  - REIMAGE the machine (cleaning is not reliable for this threat)" -ForegroundColor Red
-        Write-Host "  - After rebuild: Reinstall Notepad++ v8.8.9+ from official site" -ForegroundColor Red
-        Write-Host "  - Consider professional incident response if org/sensitive data" -ForegroundColor Red
         Write-Host "  - Report to: https://www.cisa.gov/report" -ForegroundColor Red
     }
 
-    $script:Results += "`n[!!!] POTENTIAL COMPROMISE INDICATORS FOUND - SEE RECOMMENDATIONS ABOVE"
+    $script:Results += "`n[!!!] INDICATORS OF COMPROMISE DETECTED - SEE RECOMMENDATIONS ABOVE"
+
+} elseif ($riskCount -gt 0) {
+    # Only risks found, no actual IOCs
+    if ($NoColor) {
+        Write-Output "`n$("=" * 70)"
+        Write-Output "[~] NO IOCs FOUND - Some risk factors identified"
+        Write-Output "=" * 70
+        Write-Output "`nRISK FINDINGS ($riskCount):"
+        foreach ($risk in $script:RiskFindings) { Write-Output "  - $risk" }
+        Write-Output "`nThese are NOT indicators of compromise, but you should:"
+        Write-Output "  - Update Notepad++ to v8.8.9+ if not already"
+        Write-Output "  - Run a full AV scan as a precaution"
+    } else {
+        Write-Host "`n" + "=" * 70 -ForegroundColor Yellow
+        Write-Host "[~] NO IOCs FOUND - Some risk factors identified" -ForegroundColor Yellow
+        Write-Host "=" * 70 -ForegroundColor Yellow
+
+        Write-Host "`nRISK FINDINGS ($riskCount):" -ForegroundColor Yellow
+        foreach ($risk in $script:RiskFindings) {
+            Write-Host "  - $risk" -ForegroundColor Yellow
+        }
+
+        Write-Host "`nThese are NOT indicators of compromise, but you should:" -ForegroundColor Cyan
+        Write-Host "  - Update Notepad++ to v8.8.9+ if not already" -ForegroundColor Cyan
+        Write-Host "  - Run a full AV scan as a precaution" -ForegroundColor Cyan
+    }
+
 } else {
+    # Clean scan
     if ($NoColor) {
         Write-Output "`n$("=" * 70)"
         Write-Output "[OK] NO INDICATORS OF COMPROMISE FOUND"
@@ -1367,12 +1618,11 @@ if ($script:FindingsCount -gt 0) {
         Write-Output "  [+] You updated Notepad++ after December 2025"
         Write-Output "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)"
         Write-Output "  [+] You downloaded N++ manually from official site (not auto-update)"
-        Write-Output "  [+] No IOCs were found above"
         Write-Output "`nIMPORTANT CONTEXT:"
         Write-Output "  - This was a HIGHLY TARGETED attack (only ~12 machines globally)"
-        Write-Output "  - Attack window: June - December 2025"
+        Write-Output "  - Attack window: June 1 - December 2, 2025"
         Write-Output "  - Targets: Specific orgs in Vietnam, Philippines, El Salvador, Australia"
-        Write-Output "`nLimitations: Attackers may have cleaned up artifacts. Run with -DeepHashScan for extended scanning."
+        Write-Output "`nLimitations: Attackers may have cleaned up. Run with -DeepHashScan for extended scanning."
     } else {
         Write-Host "`n" + "=" * 70 -ForegroundColor Green
         Write-Host "[OK] NO INDICATORS OF COMPROMISE FOUND" -ForegroundColor Green
@@ -1382,7 +1632,6 @@ if ($script:FindingsCount -gt 0) {
         Write-Host "  [+] You updated Notepad++ after December 2025" -ForegroundColor Green
         Write-Host "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)" -ForegroundColor Green
         Write-Host "  [+] You downloaded N++ manually from official site (not auto-update)" -ForegroundColor Green
-        Write-Host "  [+] No IOCs were found above" -ForegroundColor Green
 
         Write-Host "`nIMPORTANT CONTEXT:" -ForegroundColor Cyan
         Write-Host "  - This was a HIGHLY TARGETED attack (only ~12 machines globally)" -ForegroundColor Cyan
@@ -1412,11 +1661,40 @@ if ($script:FindingsCount -gt 0) {
 
 # Export results if requested
 if ($ExportResults) {
-    $script:Results | Out-File -FilePath $OutputPath -Encoding UTF8
+    $textPath = "$OutputPath.txt"
+    $script:Results | Out-File -FilePath $textPath -Encoding UTF8
     if ($NoColor) {
-        Write-Output "`nResults exported to: $OutputPath"
+        Write-Output "`nText results exported to: $textPath"
     } else {
-        Write-Host "`nResults exported to: $OutputPath" -ForegroundColor Cyan
+        Write-Host "`nText results exported to: $textPath" -ForegroundColor Cyan
+    }
+}
+
+# Export JSON evidence if requested
+if ($ExportJson) {
+    $jsonPath = "$OutputPath.json"
+    $exportData = @{
+        ScanTime = Get-Date -Format "o"
+        Computer = $env:COMPUTERNAME
+        User = $env:USERNAME
+        AttackWindow = @{
+            Start = $AttackStart.ToString("yyyy-MM-dd")
+            End = $AttackEnd.ToString("yyyy-MM-dd")
+        }
+        Summary = @{
+            IOCCount = $script:IOCFindings.Count
+            RiskCount = $script:RiskFindings.Count
+            EvidenceCount = $script:Evidence.Count
+        }
+        IOCFindings = $script:IOCFindings
+        RiskFindings = $script:RiskFindings
+        Evidence = $script:Evidence
+    }
+    $exportData | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPath -Encoding UTF8
+    if ($NoColor) {
+        Write-Output "JSON evidence exported to: $jsonPath"
+    } else {
+        Write-Host "JSON evidence exported to: $jsonPath" -ForegroundColor Cyan
     }
 }
 
@@ -1424,7 +1702,7 @@ if ($ExportResults) {
 if (-not $NoColor) {
     Write-Host "`n" -NoNewline
     Write-Host "IoC Sources: Kaspersky GReAT + Rapid7 Labs (Feb 2026)" -ForegroundColor DarkGray
-    Write-Host "Run with -DeepHashScan for extended scanning, -NoColor for plain text output" -ForegroundColor DarkGray
+    Write-Host "Options: -DeepHashScan (extended), -NoColor (plain), -ExportJson (structured)" -ForegroundColor DarkGray
 }
 
 Write-Host "`n"
@@ -1432,5 +1710,6 @@ Write-Host "`n"
 # ============================================================================
 # EXIT CODE
 # ============================================================================
-# Exit 0 = clean, Exit N = N alerts detected (useful for automation/CI)
-exit $script:FindingsCount
+# Exit code = IOC count (0 = clean, N = N IOCs found)
+# Risk findings don't affect exit code (they're not compromise indicators)
+exit $script:IOCFindings.Count
