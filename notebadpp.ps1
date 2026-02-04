@@ -819,10 +819,12 @@ try {
     
     foreach ($entry in $dnsCache) {
         foreach ($domain in $MaliciousDomains) {
-            if ($entry.Entry -like "*$domain*") {
-                Write-IOC "MALICIOUS DOMAIN IN DNS CACHE: $($entry.Entry)"
+            if ($entry.Name -like "*$domain*") {
+                Write-IOC "MALICIOUS DOMAIN IN DNS CACHE: $($entry.Name)"
                 Write-Info "  Data: $($entry.Data)"
                 Write-Info "  TTL: $($entry.TimeToLive)"
+                Add-Evidence -Category "Network" -Severity "HIGH" `
+                    -Description "Malicious domain in DNS cache" -Extra @{ Domain = $entry.Name; Data = $entry.Data }
                 $maliciousDnsFound = $true
             }
         }
@@ -849,6 +851,8 @@ if (Test-Path $hostsPath) {
         foreach ($hit in $hostsHit) {
             Write-IOC "MALICIOUS DOMAIN IN HOSTS FILE: $($hit.Line)"
             Write-Info "  Line number: $($hit.LineNumber)"
+            Add-Evidence -Category "Network" -Severity "HIGH" `
+                -Description "Malicious domain in hosts file" -Path $hostsPath -Extra @{ Line = $hit.Line; LineNumber = $hit.LineNumber }
         }
     } else {
         Write-Clean "No C2 domains found in hosts file"
@@ -874,10 +878,17 @@ try {
             Write-Info "  Local Port: $($conn.LocalPort)"
             Write-Info "  Remote Port: $($conn.RemotePort)"
             Write-Info "  State: $($conn.State)"
+            $procName = "Unknown"
             try {
                 $process = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-                Write-Info "  Process: $($process.Name) (PID: $($conn.OwningProcess))"
+                $procName = $process.Name
+                Write-Info "  Process: $procName (PID: $($conn.OwningProcess))"
             } catch {}
+            Add-Evidence -Category "Network" -Severity "HIGH" `
+                -Description "Active connection to malicious IP" -Extra @{
+                    RemoteIP = $remoteIP; LocalPort = $conn.LocalPort;
+                    RemotePort = $conn.RemotePort; Process = $procName; PID = $conn.OwningProcess
+                }
             $maliciousConnFound = $true
         }
     }
@@ -900,6 +911,8 @@ try {
     if ($netstatOutput) {
         foreach ($line in $netstatOutput) {
             Write-IOC "MALICIOUS IP IN NETSTAT: $line"
+            Add-Evidence -Category "Network" -Severity "HIGH" `
+                -Description "Malicious IP found in netstat output" -Extra @{ Entry = $line.ToString().Trim() }
         }
     } else {
         Write-Clean "No connections to C2 IPs found in netstat"
@@ -926,6 +939,9 @@ try {
                     Write-IOC "MALICIOUS DOMAIN IN DNS LOGS: $domain"
                     Write-Info "  Time: $($event.TimeCreated)"
                     Write-Info "  Event ID: $($event.Id)"
+                    Add-Evidence -Category "Network" -Severity "HIGH" `
+                        -Description "Malicious domain in DNS event logs" -Timestamp $event.TimeCreated `
+                        -Extra @{ Domain = $domain; EventID = $event.Id }
                     $maliciousDnsLogs = $true
                 }
             }
@@ -957,9 +973,13 @@ if (Test-Path $firewallLogPath) {
         
         foreach ($line in $logContent) {
             foreach ($ip in $MaliciousIPs) {
-                if ($line -match $ip) {
+                $escapedIP = [regex]::Escape($ip)
+                if ($line -match $escapedIP) {
                     Write-IOC "MALICIOUS IP IN FIREWALL LOG: $ip"
                     Write-Info "  Log entry: $line"
+                    Add-Evidence -Category "Network" -Severity "HIGH" `
+                        -Description "Malicious IP in firewall log" -Path $firewallLogPath `
+                        -Extra @{ IP = $ip; LogEntry = $line.Trim() }
                     $maliciousFirewallHits = $true
                 }
             }
@@ -997,6 +1017,9 @@ try {
                     $processId = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ProcessId' }).'#text'
                     $image = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'Image' }).'#text'
                     Write-Info "  Process: $image (PID: $processId)"
+                    Add-Evidence -Category "Network" -Severity "HIGH" `
+                        -Description "Malicious DNS query in Sysmon" -Timestamp $event.TimeCreated `
+                        -Extra @{ Query = $queryName; Process = $image; PID = $processId }
                     $maliciousSysmonDns = $true
                 }
             }
@@ -1136,6 +1159,9 @@ if (Test-Path $psHistoryPath) {
                 Write-IOC "MALICIOUS COMMAND PATTERN IN POWERSHELL HISTORY"
                 Write-Info "  Line $lineNum`: $line"
                 Write-Info "  Pattern: $pattern"
+                Add-Evidence -Category "CommandHistory" -Severity "HIGH" `
+                    -Description "Malicious command pattern in PowerShell history" -Path $psHistoryPath `
+                    -Extra @{ Command = $line.Trim(); Pattern = $pattern; Line = $lineNum }
                 $maliciousHistoryFound = $true
             }
         }
@@ -1143,6 +1169,9 @@ if (Test-Path $psHistoryPath) {
         if ($line -match "temp\.sh") {
             Write-IOC "Reference to temp.sh found in PowerShell history"
             Write-Info "  Line $lineNum`: $line"
+            Add-Evidence -Category "CommandHistory" -Severity "HIGH" `
+                -Description "Reference to temp.sh in PowerShell history" -Path $psHistoryPath `
+                -Extra @{ Command = $line.Trim(); Line = $lineNum }
             $maliciousHistoryFound = $true
         }
     }
@@ -1164,6 +1193,9 @@ try {
             foreach ($pattern in $maliciousCommandPatterns) {
                 if ($cmd -match $pattern) {
                     Write-IOC "Malicious command in Run history: $cmd"
+                    Add-Evidence -Category "CommandHistory" -Severity "HIGH" `
+                        -Description "Malicious command in Run history" `
+                        -Extra @{ Command = $cmd; Pattern = $pattern }
                 }
             }
         }
@@ -1186,6 +1218,8 @@ foreach ($searchPath in $searchPaths) {
         if ($content -match "whoami|AUTHORITY\\") {
             Write-IOC "Reconnaissance output file found: $searchPath"
             Write-Info "  This file may contain exfiltrated system info"
+            Add-Evidence -Category "ReconFile" -Severity "HIGH" `
+                -Description "Reconnaissance output file found" -Path $searchPath
         }
     }
 }
@@ -1221,6 +1255,9 @@ if (Test-Path $securityLogPath) {
         Write-IOC "Security log contains suspicious entries from attack window" "MEDIUM"
         foreach ($entry in ($suspiciousEntries | Select-Object -First 10)) {
             Write-Info "  $entry"
+            Add-Evidence -Category "SecurityLog" -Severity "MEDIUM" `
+                -Description "Suspicious entry in Notepad++ security log" -Path $securityLogPath `
+                -Extra @{ Entry = $entry.Trim() }
         }
     } else {
         Write-Info "  Log exists but no suspicious entries found (likely benign verification failures)"
@@ -1258,10 +1295,21 @@ foreach ($dlPath in $downloadsPaths) {
                 Write-Info "  Created: $($file.CreationTime)"
                 Write-Info "  Size: $($file.Length) bytes"
                 try {
-                    $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA1).Hash
-                    Write-Info "  SHA1: $hash"
-                    if ($MaliciousHashes -contains $hash.ToLower()) {
-                        Write-IOC "MALICIOUS HASH MATCH: $($file.FullName)"
+                    $sha1 = (Get-FileHash -Path $file.FullName -Algorithm SHA1).Hash.ToLower()
+                    Write-Info "  SHA1: $sha1"
+                    if ($SHA1HashSet.Contains($sha1)) {
+                        Write-IOC "MALICIOUS HASH MATCH (SHA1): $($file.FullName)" "HIGH"
+                        Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                            -Description "SHA1 matches known malicious hash" -Path $file.FullName -Hash $sha1
+                    }
+
+                    $sha256 = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLower()
+                    Write-Info "  SHA256: $sha256"
+                    if ($SHA256HashSet.Contains($sha256)) {
+                        $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
+                        Write-IOC "MALICIOUS HASH MATCH (SHA256): $($file.FullName)" "HIGH"
+                        Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                            -Description "SHA256 matches known malicious hash: $($matchInfo.Name)" -Path $file.FullName -Hash $sha256
                     }
                 } catch {}
             }
@@ -1288,10 +1336,21 @@ foreach ($fileName in $tempSuspiciousFiles) {
         Write-Info "  Modified: $($fileInfo.LastWriteTime)"
         Write-Info "  Size: $($fileInfo.Length) bytes"
         try {
-            $hash = (Get-FileHash -Path $tempFile -Algorithm SHA1).Hash
-            Write-Info "  SHA1: $hash"
-            if ($MaliciousHashes -contains $hash.ToLower()) {
-                Write-IOC "CONFIRMED MALICIOUS: Hash matches known IOC"
+            $sha1 = (Get-FileHash -Path $tempFile -Algorithm SHA1).Hash.ToLower()
+            Write-Info "  SHA1: $sha1"
+            if ($SHA1HashSet.Contains($sha1)) {
+                Write-IOC "CONFIRMED MALICIOUS (SHA1): $tempFile" "HIGH"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "SHA1 matches known malicious hash" -Path $tempFile -Hash $sha1
+            }
+
+            $sha256 = (Get-FileHash -Path $tempFile -Algorithm SHA256).Hash.ToLower()
+            Write-Info "  SHA256: $sha256"
+            if ($SHA256HashSet.Contains($sha256)) {
+                $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
+                Write-IOC "CONFIRMED MALICIOUS (SHA256): $tempFile" "HIGH"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "SHA256 matches known malicious hash: $($matchInfo.Name)" -Path $tempFile -Hash $sha256
             }
         } catch {}
     }
@@ -1307,11 +1366,12 @@ if ($nsisDirs) {
         Write-Info "  - $($nsisDir.FullName)"
         Write-Info "    Created: $($nsisDir.CreationTime)"
         
-        # Check if created during attack window (June-Dec 2025)
-        $attackStart = [DateTime]"2025-06-01"
-        $attackEnd = [DateTime]"2025-12-31"
-        if ($nsisDir.CreationTime -ge $attackStart -and $nsisDir.CreationTime -le $attackEnd) {
-            Write-Risk "NSIS directory created during attack window (June-Dec 2025)" "MEDIUM"
+        # Check if created during attack window
+        if ($nsisDir.CreationTime -ge $AttackStart -and $nsisDir.CreationTime -le $AttackEnd) {
+            Write-Risk "NSIS directory created during attack window" "MEDIUM"
+            Add-Evidence -Category "Staging" -Severity "MEDIUM" `
+                -Description "NSIS temp directory created during attack window" -Path $nsisDir.FullName `
+                -Timestamp $nsisDir.CreationTime
         }
     }
 } else {
@@ -1347,6 +1407,9 @@ try {
                     Write-Risk "Suspicious process creation detected"
                     Write-Info "  Time: $($event.TimeCreated)"
                     Write-Info "  Pattern matched: $pattern"
+                    Add-Evidence -Category "EventLog" -Severity "MEDIUM" `
+                        -Description "Suspicious process creation event" -Timestamp $event.TimeCreated `
+                        -Extra @{ Pattern = $pattern; EventID = $event.Id }
                     $suspiciousEventFound = $true
                 }
             }
@@ -1374,6 +1437,9 @@ try {
                 Write-Risk "Suspicious PowerShell activity detected"
                 Write-Info "  Time: $($event.TimeCreated)"
                 Write-Info "  Event ID: $($event.Id)"
+                Add-Evidence -Category "EventLog" -Severity "MEDIUM" `
+                    -Description "Suspicious PowerShell activity in operational log" -Timestamp $event.TimeCreated `
+                    -Extra @{ EventID = $event.Id }
                 $suspiciousPsFound = $true
             }
         }
@@ -1440,19 +1506,45 @@ foreach ($nppPath in $nppPaths) {
         if (Test-Path $gupExe) {
             Write-Info "  GUP.exe (updater) found: $gupExe"
             Write-Info "  GUP Modified: $((Get-Item $gupExe).LastWriteTime)"
-            $gupHash = (Get-FileHash -Path $gupExe -Algorithm SHA256).Hash
-            Write-Info "  GUP SHA256: $gupHash"
+            $gupSha256 = (Get-FileHash -Path $gupExe -Algorithm SHA256).Hash.ToLower()
+            Write-Info "  GUP SHA256: $gupSha256"
+            if ($SHA256HashSet.Contains($gupSha256)) {
+                Write-IOC "MALICIOUS GUP.EXE DETECTED (SHA256): $gupExe" "HIGH"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "GUP.exe SHA256 matches known malicious hash" -Path $gupExe -Hash $gupSha256
+            }
+            $gupSha1 = (Get-FileHash -Path $gupExe -Algorithm SHA1).Hash.ToLower()
+            Write-Info "  GUP SHA1: $gupSha1"
+            if ($SHA1HashSet.Contains($gupSha1)) {
+                Write-IOC "MALICIOUS GUP.EXE DETECTED (SHA1): $gupExe" "HIGH"
+                Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                    -Description "GUP.exe SHA1 matches known malicious hash" -Path $gupExe -Hash $gupSha1
+            }
         }
         
         # Check for any update.exe files
         $updateFiles = Get-ChildItem -Path $nppPath -Recurse -Filter "update*.exe" -ErrorAction SilentlyContinue
         foreach ($updateFile in $updateFiles) {
             Write-Info "  Update file found: $($updateFile.FullName)"
-            $hash = (Get-FileHash -Path $updateFile.FullName -Algorithm SHA1).Hash
-            Write-Info "    SHA1: $hash"
-            if ($MaliciousHashes -contains $hash.ToLower()) {
-                Write-IOC "MALICIOUS UPDATE FILE DETECTED: $($updateFile.FullName)"
-            }
+
+            try {
+                $sha1 = (Get-FileHash -Path $updateFile.FullName -Algorithm SHA1).Hash.ToLower()
+                Write-Info "    SHA1: $sha1"
+                if ($SHA1HashSet.Contains($sha1)) {
+                    Write-IOC "MALICIOUS UPDATE FILE DETECTED (SHA1): $($updateFile.FullName)" "HIGH"
+                    Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                        -Description "Update file SHA1 matches known malicious hash" -Path $updateFile.FullName -Hash $sha1
+                }
+
+                $sha256 = (Get-FileHash -Path $updateFile.FullName -Algorithm SHA256).Hash.ToLower()
+                Write-Info "    SHA256: $sha256"
+                if ($SHA256HashSet.Contains($sha256)) {
+                    $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
+                    Write-IOC "MALICIOUS UPDATE FILE DETECTED (SHA256): $($updateFile.FullName)" "HIGH"
+                    Add-Evidence -Category "HashMatch" -Severity "HIGH" `
+                        -Description "Update file SHA256 matches known malicious hash: $($matchInfo.Name)" -Path $updateFile.FullName -Hash $sha256
+                }
+            } catch {}
         }
         
         # Check change.log for update history
