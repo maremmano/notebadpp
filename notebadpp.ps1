@@ -555,11 +555,10 @@ foreach ($dir in $SuspiciousDirectories) {
     }
 }
 
-# 2. Specific IOC filenames in key locations
+# 2. Specific IOC filenames in key locations (avoid recursive search on huge dirs)
 $searchLocations = @(
-    "$env:APPDATA",
-    "$env:LOCALAPPDATA",
     "$env:APPDATA\Notepad++",
+    "$env:LOCALAPPDATA\Notepad++",
     "$env:PROGRAMFILES\Notepad++",
     "${env:PROGRAMFILES(x86)}\Notepad++",
     "$env:USERPROFILE\Downloads"
@@ -1483,7 +1482,7 @@ foreach ($nppPath in $nppPaths) {
         )
         
         Write-Info "Installation: $nppPath"
-        Write-Info "-" * 50
+        Write-Info ("-" * 50)
         
         foreach ($file in $filesToHash) {
             $fullPath = Join-Path $nppPath $file
@@ -1543,7 +1542,7 @@ if ($iocCount -gt 0) {
     if ($NoColor) {
         Write-Output "`n$("=" * 70)"
         Write-Output "[!!!] INDICATORS OF COMPROMISE DETECTED!"
-        Write-Output "=" * 70
+        Write-Output ("=" * 70)
         Write-Output "`nIOC FINDINGS ($iocCount):"
         foreach ($ioc in $script:IOCFindings) { Write-Output "  - $ioc" }
         Write-Output "`nIMMEDIATE ACTIONS:"
@@ -1558,9 +1557,9 @@ if ($iocCount -gt 0) {
         Write-Output "  - REIMAGE the machine (cleaning is not reliable for this threat)"
         Write-Output "  - Report to: https://www.cisa.gov/report"
     } else {
-        Write-Host "`n" + "=" * 70 -ForegroundColor Red
+        Write-Host ("`n" + ("=" * 70)) -ForegroundColor Red
         Write-Host "[!!!] INDICATORS OF COMPROMISE DETECTED!" -ForegroundColor Red
-        Write-Host "=" * 70 -ForegroundColor Red
+        Write-Host ("=" * 70) -ForegroundColor Red
 
         Write-Host "`nIOC FINDINGS ($iocCount):" -ForegroundColor Red
         foreach ($ioc in $script:IOCFindings) {
@@ -1589,16 +1588,16 @@ if ($iocCount -gt 0) {
     if ($NoColor) {
         Write-Output "`n$("=" * 70)"
         Write-Output "[~] NO IOCs FOUND - Some risk factors identified"
-        Write-Output "=" * 70
+        Write-Output ("=" * 70)
         Write-Output "`nRISK FINDINGS ($riskCount):"
         foreach ($risk in $script:RiskFindings) { Write-Output "  - $risk" }
         Write-Output "`nThese are NOT indicators of compromise, but you should:"
         Write-Output "  - Update Notepad++ to v8.8.9+ if not already"
         Write-Output "  - Run a full AV scan as a precaution"
     } else {
-        Write-Host "`n" + "=" * 70 -ForegroundColor Yellow
+        Write-Host ("`n" + ("=" * 70)) -ForegroundColor Yellow
         Write-Host "[~] NO IOCs FOUND - Some risk factors identified" -ForegroundColor Yellow
-        Write-Host "=" * 70 -ForegroundColor Yellow
+        Write-Host ("=" * 70) -ForegroundColor Yellow
 
         Write-Host "`nRISK FINDINGS ($riskCount):" -ForegroundColor Yellow
         foreach ($risk in $script:RiskFindings) {
@@ -1615,7 +1614,7 @@ if ($iocCount -gt 0) {
     if ($NoColor) {
         Write-Output "`n$("=" * 70)"
         Write-Output "[OK] NO INDICATORS OF COMPROMISE FOUND"
-        Write-Output "=" * 70
+        Write-Output ("=" * 70)
         Write-Output "`nYOU ARE LIKELY NOT COMPROMISED IF:"
         Write-Output "  [+] You updated Notepad++ after December 2025"
         Write-Output "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)"
@@ -1626,9 +1625,9 @@ if ($iocCount -gt 0) {
         Write-Output "  - Targets: Specific orgs in Vietnam, Philippines, El Salvador, Australia"
         Write-Output "`nLimitations: Attackers may have cleaned up. Run with -DeepHashScan for extended scanning."
     } else {
-        Write-Host "`n" + "=" * 70 -ForegroundColor Green
+        Write-Host ("`n" + ("=" * 70)) -ForegroundColor Green
         Write-Host "[OK] NO INDICATORS OF COMPROMISE FOUND" -ForegroundColor Green
-        Write-Host "=" * 70 -ForegroundColor Green
+        Write-Host ("=" * 70) -ForegroundColor Green
 
         Write-Host "`nYOU ARE LIKELY NOT COMPROMISED IF:" -ForegroundColor Green
         Write-Host "  [+] You updated Notepad++ after December 2025" -ForegroundColor Green
