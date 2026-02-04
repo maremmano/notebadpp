@@ -104,7 +104,7 @@ cd notebadpp
 
 ### Option 2: Download Directly
 ```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/maremmano/notebadpp/main/notebadpp.ps1" -OutFile "notebadpp.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/maremmano/notebadpp/refs/heads/master/notebadpp.ps1" -OutFile "notebadpp.ps1"
 ```
 
 ## Usage
