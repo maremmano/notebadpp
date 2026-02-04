@@ -58,19 +58,22 @@ This was a **highly targeted attack** affecting approximately 12 machines global
 
 ## Features
 
-This scanner performs **19 comprehensive security checks**:
+This scanner performs **22 comprehensive security checks**:
 
 | Check | Description |
 |-------|-------------|
 | Quick Triage | Risk assessment based on N++ installation and version |
 | Suspicious Directories | Scans for known malware staging directories |
 | Suspicious Files | Checks for specific malicious file artifacts |
-| File Hash Verification | Compares SHA1 hashes against 28 known malicious IOCs |
+| SHA-1 Hash Verification | Compares SHA-1 hashes against 28 known IOCs (Kaspersky) |
+| SHA-256 Hash Scan | Compares SHA-256 hashes against 16 Rapid7 Chrysalis IOCs |
 | Registry Autorun | Checks Run/RunOnce persistence mechanisms |
 | Malicious Services | Detects suspicious Windows services |
 | Scheduled Tasks | Checks for malicious scheduled task persistence |
 | DNS Cache | Searches for malicious C2 domains |
-| Network Connections | Detects live connections to known malicious IPs |
+| Hosts File | Checks for C2 domain entries in hosts file |
+| TCP Connections | Detects live TCP connections to known malicious IPs |
+| Netstat Scan | Broader protocol scan for C2 IPs |
 | DNS Event Logs | Reviews DNS resolution history |
 | Firewall Logs | Analyzes Windows Firewall logs |
 | Sysmon DNS Logs | Checks Sysmon Event ID 22 (if installed) |
@@ -127,6 +130,27 @@ Results will be saved to your Desktop as `NotepadPP_IOC_Report_<timestamp>.txt`
 .\nppcheck.ps1 -ExportResults -OutputPath "C:\SecurityReports\npp_scan.txt"
 ```
 
+### Deep Hash Scan
+Extends SHA-256 scanning to Downloads, Temp, and ProgramData directories:
+```powershell
+.\nppcheck.ps1 -DeepHashScan
+```
+
+### Plain Text Output (for logging/automation)
+```powershell
+.\nppcheck.ps1 -NoColor | Out-File scan_results.txt
+```
+
+### Combined Options
+```powershell
+.\nppcheck.ps1 -DeepHashScan -ExportResults -NoColor
+```
+
+### Exit Codes
+The script returns the number of findings as the exit code (useful for CI/automation):
+- `0` = No indicators of compromise found
+- `N` = N alerts detected
+
 ## Understanding the Output
 
 ### Color Coding
@@ -156,6 +180,7 @@ Results will be saved to your Desktop as `NotepadPP_IOC_Report_<timestamp>.txt`
 - `95.179.213.0`
 - `59.110.7.32`
 - `124.222.137.114`
+- `61.4.102.97`
 
 ### Suspicious Directories
 - `%APPDATA%\ProShow`
@@ -207,8 +232,10 @@ If the scanner reports findings:
 ## References
 
 - [Kaspersky GReAT Research - February 2026](https://securelist.com/) (when available)
+- [Rapid7 Labs - The Chrysalis Backdoor](https://www.rapid7.com/blog/post/tr-chrysalis-backdoor-dive-into-lotus-blossoms-toolkit/)
 - [Notepad++ Official Downloads](https://notepad-plus-plus.org/downloads/)
 - [Notepad++ GitHub Releases](https://github.com/notepad-plus-plus/notepad-plus-plus/releases)
+- [CISA Incident Reporting](https://www.cisa.gov/report)
 
 ## Contributing
 

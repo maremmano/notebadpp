@@ -2,27 +2,70 @@
 <#
 .SYNOPSIS
     Checks for indicators of compromise related to the Notepad++ supply chain attack (June-December 2025)
+
 .DESCRIPTION
     This script checks for:
     - Suspicious directories and files
-    - Known malicious file hashes (SHA1)
+    - Known malicious file hashes (SHA1 from Kaspersky, SHA256 from Rapid7)
     - Registry autorun persistence
+    - Windows services and scheduled tasks persistence
     - DNS cache entries for malicious domains
+    - Hosts file tampering
     - Active network connections to malicious IPs
     - DNS client event logs
     - Temp.sh related activity
+
+    This script is READ-ONLY and does NOT modify your system.
+
+.PARAMETER ExportResults
+    Export scan results to a text file.
+
+.PARAMETER OutputPath
+    Custom path for the exported results file.
+
+.PARAMETER DeepHashScan
+    Extends SHA-256 hash scanning beyond AppData to also check
+    Downloads, Temp, and ProgramData directories.
+
+.PARAMETER NoColor
+    Disables colored output. Useful for piping to a file or running in
+    environments that do not support ANSI colors.
+
+.EXAMPLE
+    .\nppcheck.ps1
+    Run a standard scan with colored output.
+
+.EXAMPLE
+    .\nppcheck.ps1 -DeepHashScan
+    Run with extended hash scanning across additional directories.
+
+.EXAMPLE
+    .\nppcheck.ps1 -NoColor | Out-File scan_results.txt
+    Run with plain text output and save to a log file.
+
+.EXAMPLE
+    .\nppcheck.ps1 -ExportResults -OutputPath "C:\Reports\scan.txt"
+    Run scan and export formatted results to custom path.
+
 .NOTES
-    Based on Kaspersky's analysis published February 3, 2026
+    IoC Sources:
+    - Kaspersky GReAT analysis published February 3, 2026
+    - Rapid7 Labs "The Chrysalis Backdoor" report February 2026
     Run as Administrator for full functionality
+
+.LINK
+    https://github.com/maremmano/nppcheck
 #>
 
 [CmdletBinding()]
 param(
     [switch]$ExportResults,
-    [string]$OutputPath = "$env:USERPROFILE\Desktop\NotepadPP_IOC_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    [string]$OutputPath = "$env:USERPROFILE\Desktop\NotepadPP_IOC_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt",
+    [switch]$DeepHashScan,
+    [switch]$NoColor
 )
 
-# Colors for output
+# Script state
 $script:FindingsCount = 0
 $script:Results = @()
 $scanStartTime = Get-Date
@@ -31,30 +74,48 @@ function Write-Finding {
     param([string]$Message, [string]$Severity = "HIGH")
     $script:FindingsCount++
     $output = "[!] [$Severity] $Message"
-    Write-Host $output -ForegroundColor Red
+    if ($NoColor) {
+        Write-Output $output
+    } else {
+        Write-Host $output -ForegroundColor Red
+    }
     $script:Results += $output
 }
 
 function Write-Clean {
     param([string]$Message)
     $output = "[OK] $Message"
-    Write-Host $output -ForegroundColor Green
+    if ($NoColor) {
+        Write-Output $output
+    } else {
+        Write-Host $output -ForegroundColor Green
+    }
     $script:Results += $output
 }
 
 function Write-Info {
     param([string]$Message)
     $output = "[*] $Message"
-    Write-Host $output -ForegroundColor Cyan
+    if ($NoColor) {
+        Write-Output $output
+    } else {
+        Write-Host $output -ForegroundColor Cyan
+    }
     $script:Results += $output
 }
 
 function Write-Section {
     param([string]$Title)
     $separator = "=" * 70
-    Write-Host "`n$separator" -ForegroundColor Yellow
-    Write-Host "  $Title" -ForegroundColor Yellow
-    Write-Host "$separator" -ForegroundColor Yellow
+    if ($NoColor) {
+        Write-Output "`n$separator"
+        Write-Output "  $Title"
+        Write-Output "$separator"
+    } else {
+        Write-Host "`n$separator" -ForegroundColor Yellow
+        Write-Host "  $Title" -ForegroundColor Yellow
+        Write-Host "$separator" -ForegroundColor Yellow
+    }
     $script:Results += "`n$separator`n  $Title`n$separator"
 }
 
@@ -114,15 +175,38 @@ $MaliciousDomains = @(
     "temp.sh"
 )
 
-# Malicious IPs
+# Malicious IPs (Kaspersky + Rapid7)
 $MaliciousIPs = @(
     "45.76.155.202",
     "45.77.31.210",
     "45.32.144.255",
     "95.179.213.0",
     "59.110.7.32",
-    "124.222.137.114"
+    "124.222.137.114",
+    "61.4.102.97"      # From Rapid7 report
 )
+
+# SHA-256 file indicators from Rapid7 Chrysalis report
+# Source: https://www.rapid7.com/blog/post/tr-chrysalis-backdoor-dive-into-lotus-blossoms-toolkit/
+$Rapid7FileIndicators = @(
+    @{ Name = "update.exe"; Hash = "a511be5164dc1122fb5a7daa3eef9467e43d8458425b15a640235796006590c9"; Desc = "Malicious NSIS installer delivered via hijacked Notepad++ update" },
+    @{ Name = "[NSIS.nsi]"; Hash = "8ea8b83645fba6e23d48075a0d3fc73ad2ba515b4536710cda4f1f232718f53e"; Desc = "Installation script extracted from NSIS installer" },
+    @{ Name = "BluetoothService.exe"; Hash = "2da00de67720f5f13b17e9d985fe70f10f153da60c9ab1086fe58f069a156924"; Desc = "Renamed Bitdefender Submission Wizard used for DLL sideloading" },
+    @{ Name = "BluetoothService"; Hash = "77bfea78def679aa1117f569a35e8fd1542df21f7e00e27f192c907e61d63a2e"; Desc = "Encrypted shellcode blob decrypted by log.dll (Chrysalis payload)" },
+    @{ Name = "log.dll"; Hash = "3bdc4c0637591533f1d4198a72a33426c01f69bd2e15ceee547866f65e26b7ad"; Desc = "Malicious DLL sideloaded by BluetoothService.exe - decrypts Chrysalis" },
+    @{ Name = "u.bat"; Hash = "9276594e73cda1c69b7d265b3f08dc8fa84bf2d6599086b9acc0bb3745146600"; Desc = "Batch script used for cleanup or persistence" },
+    @{ Name = "conf.c"; Hash = "f4d829739f2d6ba7e3ede83dad428a0ced1a703ec582fc73a4eee3df3704629a"; Desc = "Source with embedded Metasploit block_api shellcode, compiled via TCC" },
+    @{ Name = "libtcc.dll"; Hash = "4a52570eeaf9d27722377865df312e295a7a23c3b6eb991944c2ecd707cc9906"; Desc = "Tiny C Compiler library used to compile conf.c at runtime" },
+    @{ Name = "admin"; Hash = "831e1ea13a1bd405f5bda2b9d8f2265f7b1db6c668dd2165ccc8a9c4c15ea7dd"; Desc = "Cobalt Strike beacon payload downloaded from api.wiresguard.com" },
+    @{ Name = "loader1"; Hash = "0a9b8df968df41920b6ff07785cbfebe8bda29e6b512c94a3b2a83d10014d2fd"; Desc = "Intermediate loader in shellcode execution chain" },
+    @{ Name = "uffhxpSy"; Hash = "4c2ea8193f4a5db63b897a2d3ce127cc5d89687f380b97a1d91e0c8db542e4f8"; Desc = "Intermediate loader in shellcode execution chain" },
+    @{ Name = "loader2"; Hash = "e7cd605568c38bd6e0aba31045e1633205d0598c607a855e2e1bca4cca1c6eda"; Desc = "Second-stage loader" },
+    @{ Name = "3yzr31vk"; Hash = "078a9e5c6c787e5532a7e728720cbafee9021bfec4a30e3c2be110748d7c43c5"; Desc = "Second-stage loader" },
+    @{ Name = "ConsoleApplication2.exe"; Hash = "b4169a831292e245ebdffedd5820584d73b129411546e7d3eccf4663d5fc5be3"; Desc = "Warbird loader - abuses Microsoft Warbird framework" },
+    @{ Name = "system"; Hash = "7add554a98d3a99b319f2127688356c1283ed073a084805f14e33b4f6a6126fd"; Desc = "Additional payload in attack toolchain" },
+    @{ Name = "s047t5g.exe"; Hash = "fcc2765305bcd213b7558025b2039df2265c3e0b6401e4833123c461df2de51a"; Desc = "Additional executable in attack toolchain" }
+)
+$Rapid7Hashes = $Rapid7FileIndicators | ForEach-Object { $_.Hash.ToLower() }
 
 # Suspicious directories
 $SuspiciousDirectories = @(
@@ -131,7 +215,7 @@ $SuspiciousDirectories = @(
     "$env:APPDATA\Bluetooth"
 )
 
-# Suspicious file names
+# Suspicious file names (Kaspersky + Rapid7)
 $SuspiciousFiles = @(
     "$env:APPDATA\ProShow\load",
     "$env:APPDATA\ProShow\ProShow.exe",
@@ -148,6 +232,10 @@ $SuspiciousFiles = @(
     "$env:APPDATA\Bluetooth\BluetoothService.exe",
     "$env:APPDATA\Bluetooth\BluetoothService",
     "$env:APPDATA\Bluetooth\log.dll",
+    # Additional files from Rapid7 report
+    "$env:APPDATA\Bluetooth\u.bat",
+    "$env:APPDATA\Bluetooth\conf.c",
+    "$env:APPDATA\Bluetooth\libtcc.dll",
     "$env:LOCALAPPDATA\Temp\ns*.tmp",
     "C:\ProgramData\USOShared\*.exe"
 )
@@ -337,7 +425,7 @@ foreach ($path in $additionalPaths) {
 
 $hashMatches = 0
 if ($filesToHash.Count -gt 0) {
-    Write-Info "Checking $($filesToHash.Count) files against known malicious hashes..."
+    Write-Info "Checking $($filesToHash.Count) files against known malicious SHA-1 hashes..."
     foreach ($file in $filesToHash) {
         try {
             $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA1 -ErrorAction SilentlyContinue).Hash
@@ -351,10 +439,53 @@ if ($filesToHash.Count -gt 0) {
         }
     }
     if ($hashMatches -eq 0) {
-        Write-Clean "No known malicious file hashes found"
+        Write-Clean "No known malicious SHA-1 hashes found"
     }
 } else {
     Write-Clean "No suspicious files to hash"
+}
+
+# ============================================================================
+# CHECK 3b: SHA-256 Hash Scan (Rapid7 Chrysalis IOCs)
+# ============================================================================
+Write-Section "CHECK 3b: SHA-256 Hash Scan (Rapid7 Chrysalis IOCs)"
+
+if ($DeepHashScan) {
+    Write-Info "Deep scan enabled: scanning AppData, LocalAppData, Downloads, Temp, ProgramData..."
+    $sha256SearchPaths = @($env:APPDATA, $env:LOCALAPPDATA, $env:TEMP, "$env:USERPROFILE\Downloads", "$env:ProgramData")
+} else {
+    Write-Info "Standard scan: scanning AppData and LocalAppData (use -DeepHashScan for more)"
+    $sha256SearchPaths = @($env:APPDATA, $env:LOCALAPPDATA)
+}
+
+$sha256Hits = 0
+$filesScanned = 0
+
+foreach ($searchPath in $sha256SearchPaths) {
+    if (-not (Test-Path $searchPath)) { continue }
+    $candidates = Get-ChildItem -Path $searchPath -Include *.exe, *.dll, *.bat, *.cmd -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($file in $candidates) {
+        $filesScanned++
+        try {
+            $sha256 = (Get-FileHash $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+            if ($Rapid7Hashes -contains $sha256) {
+                $matchInfo = $Rapid7FileIndicators | Where-Object { $_.Hash.ToLower() -eq $sha256 }
+                Write-Finding "RAPID7 SHA-256 HASH MATCH: $($file.FullName)"
+                Write-Info "  SHA-256: $sha256"
+                Write-Info "  Known As: $($matchInfo.Name)"
+                Write-Info "  Description: $($matchInfo.Desc)"
+                $sha256Hits++
+            }
+        } catch {
+            # Skip files we can't hash
+        }
+    }
+}
+
+if ($sha256Hits -eq 0) {
+    Write-Clean "No Rapid7 Chrysalis SHA-256 matches ($filesScanned files scanned)"
+} else {
+    Write-Info "Total SHA-256 matches: $sha256Hits"
 }
 
 # ============================================================================
@@ -501,9 +632,31 @@ try {
 }
 
 # ============================================================================
+# CHECK 5b: Hosts File Analysis
+# ============================================================================
+Write-Section "CHECK 5b: Hosts File for C2 Domains"
+
+$hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+$C2Regex = ($MaliciousDomains | ForEach-Object { [regex]::Escape($_) }) -join '|'
+
+if (Test-Path $hostsPath) {
+    $hostsHit = Select-String -Path $hostsPath -Pattern $C2Regex -ErrorAction SilentlyContinue
+    if ($hostsHit) {
+        foreach ($hit in $hostsHit) {
+            Write-Finding "MALICIOUS DOMAIN IN HOSTS FILE: $($hit.Line)"
+            Write-Info "  Line number: $($hit.LineNumber)"
+        }
+    } else {
+        Write-Clean "No C2 domains found in hosts file"
+    }
+} else {
+    Write-Info "Hosts file not found at expected location"
+}
+
+# ============================================================================
 # CHECK 6: Active Network Connections
 # ============================================================================
-Write-Section "CHECK 6: Active Network Connections"
+Write-Section "CHECK 6: Active Network Connections (TCP)"
 
 try {
     $connections = Get-NetTCPConnection -ErrorAction SilentlyContinue | 
@@ -530,6 +683,25 @@ try {
     }
 } catch {
     Write-Info "Could not check network connections"
+}
+
+# ============================================================================
+# CHECK 6b: Netstat Scan (All Protocols)
+# ============================================================================
+Write-Section "CHECK 6b: Netstat Scan for C2 IPs (All Protocols)"
+
+$ipPattern = ($MaliciousIPs | ForEach-Object { [regex]::Escape($_) }) -join '|'
+try {
+    $netstatOutput = netstat -an 2>$null | Select-String $ipPattern
+    if ($netstatOutput) {
+        foreach ($line in $netstatOutput) {
+            Write-Finding "MALICIOUS IP IN NETSTAT: $line"
+        }
+    } else {
+        Write-Clean "No connections to C2 IPs found in netstat"
+    }
+} catch {
+    Write-Info "Could not run netstat scan"
 }
 
 # ============================================================================
@@ -1136,72 +1308,129 @@ Scan Duration: $([math]::Round(((Get-Date) - $scanStartTime).TotalSeconds, 2)) s
 Total findings: $($script:FindingsCount)
 "@
 
-Write-Host $summary
+if ($NoColor) {
+    Write-Output $summary
+} else {
+    Write-Host $summary
+}
 $script:Results += $summary
 
 if ($script:FindingsCount -gt 0) {
-    Write-Host "`n" + "=" * 70 -ForegroundColor Red
-    Write-Host "[!!!] POTENTIAL COMPROMISE INDICATORS FOUND!" -ForegroundColor Red
-    Write-Host "=" * 70 -ForegroundColor Red
-    
-    Write-Host "`nIMMEDIATE ACTIONS:" -ForegroundColor Yellow
-    Write-Host "  1. DISCONNECT from network NOW (Wi-Fi off / unplug Ethernet)" -ForegroundColor Yellow
-    Write-Host "  2. DO NOT delete files yet - preserve evidence" -ForegroundColor Yellow
-    Write-Host "  3. Take screenshots of findings" -ForegroundColor Yellow
-    
-    Write-Host "`nNEXT STEPS:" -ForegroundColor Yellow
-    Write-Host "  4. Run full AV scan (Windows Defender / Kaspersky / Malwarebytes)" -ForegroundColor Yellow
-    Write-Host "  5. Use Microsoft Defender Offline Scan for deeper analysis" -ForegroundColor Yellow
-    Write-Host "  6. If this is a work machine: Contact IT Security immediately" -ForegroundColor Yellow
-    Write-Host "  7. Assume credentials exposed - prepare to change passwords:" -ForegroundColor Yellow
-    Write-Host "     - Email, Password Manager, GitHub, VPN, Cloud services" -ForegroundColor Yellow
-    
-    Write-Host "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis backdoor):" -ForegroundColor Red
-    Write-Host "  - REIMAGE the machine (cleaning is not reliable for this threat)" -ForegroundColor Red
-    Write-Host "  - After rebuild: Reinstall Notepad++ v8.8.9+ from official site" -ForegroundColor Red
-    Write-Host "  - Consider professional incident response if org/sensitive data" -ForegroundColor Red
-    
+    if ($NoColor) {
+        Write-Output "`n$("=" * 70)"
+        Write-Output "[!!!] POTENTIAL COMPROMISE INDICATORS FOUND!"
+        Write-Output "=" * 70
+        Write-Output "`nIMMEDIATE ACTIONS:"
+        Write-Output "  1. DISCONNECT from network NOW (Wi-Fi off / unplug Ethernet)"
+        Write-Output "  2. DO NOT delete files yet - preserve evidence"
+        Write-Output "  3. Take screenshots of findings"
+        Write-Output "`nNEXT STEPS:"
+        Write-Output "  4. Run full AV scan (Windows Defender / Kaspersky / Malwarebytes)"
+        Write-Output "  5. Use Microsoft Defender Offline Scan for deeper analysis"
+        Write-Output "  6. If this is a work machine: Contact IT Security immediately"
+        Write-Output "  7. Assume credentials exposed - prepare to change passwords"
+        Write-Output "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis backdoor):"
+        Write-Output "  - REIMAGE the machine (cleaning is not reliable for this threat)"
+        Write-Output "  - After rebuild: Reinstall Notepad++ v8.8.9+ from official site"
+        Write-Output "  - Report to: https://www.cisa.gov/report"
+    } else {
+        Write-Host "`n" + "=" * 70 -ForegroundColor Red
+        Write-Host "[!!!] POTENTIAL COMPROMISE INDICATORS FOUND!" -ForegroundColor Red
+        Write-Host "=" * 70 -ForegroundColor Red
+
+        Write-Host "`nIMMEDIATE ACTIONS:" -ForegroundColor Yellow
+        Write-Host "  1. DISCONNECT from network NOW (Wi-Fi off / unplug Ethernet)" -ForegroundColor Yellow
+        Write-Host "  2. DO NOT delete files yet - preserve evidence" -ForegroundColor Yellow
+        Write-Host "  3. Take screenshots of findings" -ForegroundColor Yellow
+
+        Write-Host "`nNEXT STEPS:" -ForegroundColor Yellow
+        Write-Host "  4. Run full AV scan (Windows Defender / Kaspersky / Malwarebytes)" -ForegroundColor Yellow
+        Write-Host "  5. Use Microsoft Defender Offline Scan for deeper analysis" -ForegroundColor Yellow
+        Write-Host "  6. If this is a work machine: Contact IT Security immediately" -ForegroundColor Yellow
+        Write-Host "  7. Assume credentials exposed - prepare to change passwords:" -ForegroundColor Yellow
+        Write-Host "     - Email, Password Manager, GitHub, VPN, Cloud services" -ForegroundColor Yellow
+
+        Write-Host "`nFOR CONFIRMED COMPROMISE (Cobalt Strike/Chrysalis backdoor):" -ForegroundColor Red
+        Write-Host "  - REIMAGE the machine (cleaning is not reliable for this threat)" -ForegroundColor Red
+        Write-Host "  - After rebuild: Reinstall Notepad++ v8.8.9+ from official site" -ForegroundColor Red
+        Write-Host "  - Consider professional incident response if org/sensitive data" -ForegroundColor Red
+        Write-Host "  - Report to: https://www.cisa.gov/report" -ForegroundColor Red
+    }
+
     $script:Results += "`n[!!!] POTENTIAL COMPROMISE INDICATORS FOUND - SEE RECOMMENDATIONS ABOVE"
 } else {
-    Write-Host "`n" + "=" * 70 -ForegroundColor Green
-    Write-Host "[OK] NO INDICATORS OF COMPROMISE FOUND" -ForegroundColor Green
-    Write-Host "=" * 70 -ForegroundColor Green
-    
-    Write-Host "`nYOU ARE LIKELY NOT COMPROMISED IF:" -ForegroundColor Green
-    Write-Host "  [+] You updated Notepad++ after December 2025" -ForegroundColor Green
-    Write-Host "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)" -ForegroundColor Green
-    Write-Host "  [+] You downloaded N++ manually from official site (not auto-update)" -ForegroundColor Green
-    Write-Host "  [+] No IOCs were found above" -ForegroundColor Green
-    
-    Write-Host "`nIMPORTANT CONTEXT:" -ForegroundColor Cyan
-    Write-Host "  - This was a HIGHLY TARGETED attack (only ~12 machines globally)" -ForegroundColor Cyan
-    Write-Host "  - Attack window: June - December 2025" -ForegroundColor Cyan
-    Write-Host "  - Targets: Specific orgs in Vietnam, Philippines, El Salvador, Australia" -ForegroundColor Cyan
-    
-    Write-Host "`nHowever, this scan has limitations:" -ForegroundColor Cyan
-    Write-Host "  - Attackers may have cleaned up artifacts" -ForegroundColor Cyan
-    Write-Host "  - Some logs may have rotated or been cleared" -ForegroundColor Cyan
-    Write-Host "  - Network-level IOCs require router/firewall log review" -ForegroundColor Cyan
-    
-    Write-Host "`nRECOMMENDED PREVENTIVE ACTIONS:" -ForegroundColor Cyan
-    Write-Host "  1. Update Notepad++ to v8.8.9+ (CRITICAL security fixes)" -ForegroundColor Cyan
-    Write-Host "  2. Download ONLY from: https://notepad-plus-plus.org/downloads/" -ForegroundColor Cyan
-    Write-Host "  3. Verify file integrity: Help -> About -> compare hash to GitHub" -ForegroundColor Cyan
-    Write-Host "  4. Consider using the portable version (no auto-updater)" -ForegroundColor Cyan
-    Write-Host "  5. Check router/DNS logs for historical connections to:" -ForegroundColor Cyan
-    Write-Host "     temp.sh, cdncheck.it, safe-dns.it, self-dns.it" -ForegroundColor Cyan
-    Write-Host "  6. Run a full AV scan with updated definitions" -ForegroundColor Cyan
-    
-    Write-Host "`nWARNING - BEWARE OF SCAMS:" -ForegroundColor Yellow
-    Write-Host "  - Attackers may use fake 'security breach' alerts to trick you" -ForegroundColor Yellow
-    Write-Host "  - NEVER download 'security scanners' from untrusted sources" -ForegroundColor Yellow
-    Write-Host "  - Verify breach reports through official sources (CISA, vendor sites)" -ForegroundColor Yellow
+    if ($NoColor) {
+        Write-Output "`n$("=" * 70)"
+        Write-Output "[OK] NO INDICATORS OF COMPROMISE FOUND"
+        Write-Output "=" * 70
+        Write-Output "`nYOU ARE LIKELY NOT COMPROMISED IF:"
+        Write-Output "  [+] You updated Notepad++ after December 2025"
+        Write-Output "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)"
+        Write-Output "  [+] You downloaded N++ manually from official site (not auto-update)"
+        Write-Output "  [+] No IOCs were found above"
+        Write-Output "`nIMPORTANT CONTEXT:"
+        Write-Output "  - This was a HIGHLY TARGETED attack (only ~12 machines globally)"
+        Write-Output "  - Attack window: June - December 2025"
+        Write-Output "  - Targets: Specific orgs in Vietnam, Philippines, El Salvador, Australia"
+        Write-Output "`nLimitations: Attackers may have cleaned up artifacts. Run with -DeepHashScan for extended scanning."
+    } else {
+        Write-Host "`n" + "=" * 70 -ForegroundColor Green
+        Write-Host "[OK] NO INDICATORS OF COMPROMISE FOUND" -ForegroundColor Green
+        Write-Host "=" * 70 -ForegroundColor Green
+
+        Write-Host "`nYOU ARE LIKELY NOT COMPROMISED IF:" -ForegroundColor Green
+        Write-Host "  [+] You updated Notepad++ after December 2025" -ForegroundColor Green
+        Write-Host "  [+] You're not in targeted sectors (govt/financial in VN, PH, SV, AU)" -ForegroundColor Green
+        Write-Host "  [+] You downloaded N++ manually from official site (not auto-update)" -ForegroundColor Green
+        Write-Host "  [+] No IOCs were found above" -ForegroundColor Green
+
+        Write-Host "`nIMPORTANT CONTEXT:" -ForegroundColor Cyan
+        Write-Host "  - This was a HIGHLY TARGETED attack (only ~12 machines globally)" -ForegroundColor Cyan
+        Write-Host "  - Attack window: June - December 2025" -ForegroundColor Cyan
+        Write-Host "  - Targets: Specific orgs in Vietnam, Philippines, El Salvador, Australia" -ForegroundColor Cyan
+
+        Write-Host "`nHowever, this scan has limitations:" -ForegroundColor Cyan
+        Write-Host "  - Attackers may have cleaned up artifacts" -ForegroundColor Cyan
+        Write-Host "  - Some logs may have rotated or been cleared" -ForegroundColor Cyan
+        Write-Host "  - Network-level IOCs require router/firewall log review" -ForegroundColor Cyan
+
+        Write-Host "`nRECOMMENDED PREVENTIVE ACTIONS:" -ForegroundColor Cyan
+        Write-Host "  1. Update Notepad++ to v8.8.9+ (CRITICAL security fixes)" -ForegroundColor Cyan
+        Write-Host "  2. Download ONLY from: https://notepad-plus-plus.org/downloads/" -ForegroundColor Cyan
+        Write-Host "  3. Verify file integrity: Help -> About -> compare hash to GitHub" -ForegroundColor Cyan
+        Write-Host "  4. Consider using the portable version (no auto-updater)" -ForegroundColor Cyan
+        Write-Host "  5. Check router/DNS logs for historical connections to:" -ForegroundColor Cyan
+        Write-Host "     temp.sh, cdncheck.it, safe-dns.it, self-dns.it" -ForegroundColor Cyan
+        Write-Host "  6. Run a full AV scan with updated definitions" -ForegroundColor Cyan
+
+        Write-Host "`nWARNING - BEWARE OF SCAMS:" -ForegroundColor Yellow
+        Write-Host "  - Attackers may use fake 'security breach' alerts to trick you" -ForegroundColor Yellow
+        Write-Host "  - NEVER download 'security scanners' from untrusted sources" -ForegroundColor Yellow
+        Write-Host "  - Verify breach reports through official sources (CISA, vendor sites)" -ForegroundColor Yellow
+    }
 }
 
 # Export results if requested
 if ($ExportResults) {
     $script:Results | Out-File -FilePath $OutputPath -Encoding UTF8
-    Write-Host "`nResults exported to: $OutputPath" -ForegroundColor Cyan
+    if ($NoColor) {
+        Write-Output "`nResults exported to: $OutputPath"
+    } else {
+        Write-Host "`nResults exported to: $OutputPath" -ForegroundColor Cyan
+    }
+}
+
+# Footer with IoC sources
+if (-not $NoColor) {
+    Write-Host "`n" -NoNewline
+    Write-Host "IoC Sources: Kaspersky GReAT + Rapid7 Labs (Feb 2026)" -ForegroundColor DarkGray
+    Write-Host "Run with -DeepHashScan for extended scanning, -NoColor for plain text output" -ForegroundColor DarkGray
 }
 
 Write-Host "`n"
+
+# ============================================================================
+# EXIT CODE
+# ============================================================================
+# Exit 0 = clean, Exit N = N alerts detected (useful for automation/CI)
+exit $script:FindingsCount
