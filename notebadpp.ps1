@@ -54,7 +54,7 @@
     Run as Administrator for full functionality
 
 .LINK
-    https://github.com/maremmano/nppcheck
+    https://github.com/maremmano/notebadpp
 #>
 
 [CmdletBinding()]
@@ -246,14 +246,14 @@ $SuspiciousFiles = @(
 
 Write-Host @"
 
-    _   __      __                       __  __     __     
-   / | / /___  / /____  ____  ____ _____/ /_/ /_   / /_    
-  /  |/ / __ \/ __/ _ \/ __ \/ __ `/ __  / __/ _ \/ __ \   
- / /|  / /_/ / /_/  __/ /_/ / /_/ / /_/ / /_/  __/ / / /   
-/_/ |_/\____/\__/\___/ .___/\__,_/\__,_/\__/\___/_/ /_/    
-                    /_/                                    
-    Supply Chain Attack IOC Scanner
-    Based on Kaspersky GReAT Research (Feb 2026)
+    _   __      __       ____            __    __
+   / | / /___  / /____  / __ )____ _____/ /  _/ /_ __
+  /  |/ / __ \/ __/ _ \/ __  / __ `/ __  /   / __ \/ __ \
+ / /|  / /_/ / /_/  __/ /_/ / /_/ / /_/ /  _/ /_/ / /_/ /
+/_/ |_/\____/\__/\___/_____/\__,_/\__,_/  (_)_.___/ .___/
+                                                 /_/
+    Notepad++ Supply Chain Attack IOC Scanner
+    Based on Kaspersky GReAT + Rapid7 Labs Research (Feb 2026)
 
 "@ -ForegroundColor Magenta
 

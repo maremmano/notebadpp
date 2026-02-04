@@ -4,25 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repository contains `nppcheck.ps1`, a PowerShell IOC (Indicators of Compromise) scanner for detecting the Notepad++ supply chain attack that occurred between June-December 2025. The script is based on Kaspersky GReAT research published February 2026.
+**NoteBad++** (`notebadpp.ps1`) is a PowerShell IOC (Indicators of Compromise) scanner for detecting the Notepad++ supply chain attack that occurred between June-December 2025. The script is based on Kaspersky GReAT and Rapid7 Labs research published February 2026.
 
 ## Running the Script
 
 ```powershell
 # Basic scan (requires Administrator)
-.\nppcheck.ps1
+.\notebadpp.ps1
 
 # Export results to file
-.\nppcheck.ps1 -ExportResults
+.\notebadpp.ps1 -ExportResults
 
 # Deep hash scan (extends to Downloads, Temp, ProgramData)
-.\nppcheck.ps1 -DeepHashScan
+.\notebadpp.ps1 -DeepHashScan
 
 # Plain text output for logging/automation
-.\nppcheck.ps1 -NoColor | Out-File scan.txt
+.\notebadpp.ps1 -NoColor | Out-File scan.txt
 
 # Custom output path
-.\nppcheck.ps1 -ExportResults -OutputPath "C:\path\to\report.txt"
+.\notebadpp.ps1 -ExportResults -OutputPath "C:\path\to\report.txt"
 ```
 
 The script requires Administrator privileges (`#Requires -RunAsAdministrator`).

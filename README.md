@@ -1,15 +1,15 @@
-# Notepad++ Supply Chain Attack IOC Scanner
+# NoteBad++
 
 A PowerShell-based Indicators of Compromise (IOC) scanner for detecting the Notepad++ supply chain attack that occurred between June-December 2025.
 
 ```
-    _   __      __                       __  __     __
-   / | / /___  / /____  ____  ____ _____/ /_/ /_   / /_
-  /  |/ / __ \/ __/ _ \/ __ \/ __ `/ __  / __/ _ \/ __ \
- / /|  / /_/ / /_/  __/ /_/ / /_/ / /_/ / /_/  __/ / / /
-/_/ |_/\____/\__/\___/ .___/\__,_/\__,_/\__/\___/_/ /_/
-                    /_/
-    Supply Chain Attack IOC Scanner
+    _   __      __       ____            __    __
+   / | / /___  / /____  / __ )____ _____/ /  _/ /_ __
+  /  |/ / __ \/ __/ _ \/ __  / __ `/ __  /   / __ \/ __ \
+ / /|  / /_/ / /_/  __/ /_/ / /_/ / /_/ /  _/ /_/ / /_/ /
+/_/ |_/\____/\__/\___/_____/\__,_/\__,_/  (_)_.___/ .___/
+                                                 /_/
+    Notepad++ Supply Chain Attack IOC Scanner
 ```
 
 ## Disclaimer
@@ -96,13 +96,13 @@ This scanner performs **22 comprehensive security checks**:
 
 ### Option 1: Clone the Repository
 ```powershell
-git clone https://github.com/maremmano/nppcheck.git
-cd nppcheck
+git clone https://github.com/maremmano/notebadpp.git
+cd notebadpp
 ```
 
 ### Option 2: Download Directly
 ```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/maremmano/nppcheck/main/nppcheck.ps1" -OutFile "nppcheck.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/maremmano/notebadpp/main/notebadpp.ps1" -OutFile "notebadpp.ps1"
 ```
 
 ## Usage
@@ -116,34 +116,34 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/maremmano/nppcheck/mai
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 
 # Run the scanner
-.\nppcheck.ps1
+.\notebadpp.ps1
 ```
 
 ### Export Results to File
 ```powershell
-.\nppcheck.ps1 -ExportResults
+.\notebadpp.ps1 -ExportResults
 ```
 Results will be saved to your Desktop as `NotepadPP_IOC_Report_<timestamp>.txt`
 
 ### Custom Output Path
 ```powershell
-.\nppcheck.ps1 -ExportResults -OutputPath "C:\SecurityReports\npp_scan.txt"
+.\notebadpp.ps1 -ExportResults -OutputPath "C:\SecurityReports\npp_scan.txt"
 ```
 
 ### Deep Hash Scan
 Extends SHA-256 scanning to Downloads, Temp, and ProgramData directories:
 ```powershell
-.\nppcheck.ps1 -DeepHashScan
+.\notebadpp.ps1 -DeepHashScan
 ```
 
 ### Plain Text Output (for logging/automation)
 ```powershell
-.\nppcheck.ps1 -NoColor | Out-File scan_results.txt
+.\notebadpp.ps1 -NoColor | Out-File scan_results.txt
 ```
 
 ### Combined Options
 ```powershell
-.\nppcheck.ps1 -DeepHashScan -ExportResults -NoColor
+.\notebadpp.ps1 -DeepHashScan -ExportResults -NoColor
 ```
 
 ### Exit Codes
